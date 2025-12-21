@@ -12,7 +12,11 @@
 	let selectedAccount: string = '';
 	let mapping = new Map<string, string>();
 	let remainingTransactions: ParsedTransaction[] = [];
+	let checkedTransactions: Set<string> = new Set();
 	let isGenerating = false;
+	let accountSearchQuery: string = '';
+	let filteredAccounts: BeancountAccount[] = [];
+	let searchInput: HTMLInputElement;
 
 	onMount(() => {
 		// Load data from session storage
@@ -26,9 +30,9 @@
 
 		transactions = JSON.parse(storedTransactions);
 		accounts = JSON.parse(storedAccounts);
-		
+
 		// Convert date strings back to Date objects
-		transactions = transactions.map(t => ({
+		transactions = transactions.map((t) => ({
 			...t,
 			date: new Date(t.date)
 		}));
@@ -44,50 +48,88 @@
 	function selectIssuerGroup(group: IssuerGroup) {
 		selectedIssuer = group;
 		selectedAccount = '';
+		// Preselect all transactions for this issuer
+		const newChecked = new Set<string>();
+		group.transactions.forEach(t => newChecked.add(t.id));
+		checkedTransactions = newChecked;
 	}
 
 	function mapTransactions() {
 		if (!selectedIssuer || !selectedAccount) return;
 
-		// Store transactions before nullifying selectedIssuer
-		const transactionsToMap = selectedIssuer.transactions;
+		// Get only checked transactions
+		const transactionsToMap = selectedIssuer.transactions.filter((t) =>
+			checkedTransactions.has(t.id)
+		);
 
-		// Map all transactions from this issuer to the selected account
+		if (transactionsToMap.length === 0) return;
+
+		// Map checked transactions to the selected account
 		for (const transaction of transactionsToMap) {
 			mapping.set(transaction.id, selectedAccount);
 		}
 
 		// Remove mapped transactions from remaining
 		remainingTransactions = remainingTransactions.filter(
-			t => !transactionsToMap.some(st => st.id === t.id)
+			(t) => !transactionsToMap.some((st) => st.id === t.id)
 		);
 
-		// Reset selection
-		selectedIssuer = null;
-		selectedAccount = '';
+		// Clear checked transactions
+		checkedTransactions = new Set();
 
 		// Update issuer groups
 		updateIssuerGroups();
+		
+		// Auto-advance to next issuer if available
+		if (issuerGroups.length > 0) {
+			// Select the first available issuer group
+			selectIssuerGroup(issuerGroups[0]);
+			
+			// Focus the search input after a short delay to ensure DOM is updated
+			setTimeout(() => {
+				if (searchInput) {
+					searchInput.focus();
+					searchInput.select();
+				}
+			}, 50);
+		} else {
+			// No more issuers, clear selection
+			selectedIssuer = null;
+			selectedAccount = '';
+		}
 	}
 
 	function mapIndividualTransaction(transaction: ParsedTransaction, account: string) {
 		mapping.set(transaction.id, account);
-		
+
 		// Remove from remaining transactions
-		remainingTransactions = remainingTransactions.filter(t => t.id !== transaction.id);
-		
+		remainingTransactions = remainingTransactions.filter((t) => t.id !== transaction.id);
+
 		// Update issuer groups
 		updateIssuerGroups();
 	}
 
 	$: individualSelections = new Map<string, string>();
-	
+
 	function getIndividualSelection(transactionId: string): string {
 		return individualSelections.get(transactionId) || '';
 	}
-	
+
 	function setIndividualSelection(transactionId: string, account: string) {
 		individualSelections.set(transactionId, account);
+	}
+
+	// Reactive statement to filter accounts based on search query
+	$: {
+		if (accountSearchQuery.trim() === '') {
+			filteredAccounts = accounts;
+		} else {
+			const query = accountSearchQuery.toLowerCase();
+			filteredAccounts = accounts.filter(account => 
+				account.name.toLowerCase().includes(query) ||
+				account.type.toLowerCase().includes(query)
+			);
+		}
 	}
 
 	async function generateAndDownload() {
@@ -124,14 +166,14 @@
 	}
 </script>
 
-<div class="min-h-screen bg-gray-50 py-8 px-4">
-	<div class="max-w-7xl mx-auto">
+<div class="min-h-screen bg-gray-50 px-4 py-8">
+	<div class="mx-auto max-w-7xl">
 		<!-- Header -->
-		<div class="bg-white rounded-lg shadow-md p-6 mb-6">
-			<div class="flex justify-between items-center">
+		<div class="mb-6 rounded-lg bg-white p-6 shadow-md">
+			<div class="flex items-center justify-between">
 				<div>
 					<h1 class="text-2xl font-bold text-gray-900">Import Transactions</h1>
-					<p class="text-gray-600 mt-1">
+					<p class="mt-1 text-gray-600">
 						{remainingTransactions.length} of {transactions.length} transactions remaining
 					</p>
 				</div>
@@ -140,7 +182,7 @@
 						<button
 							on:click={generateAndDownload}
 							disabled={isGenerating}
-							class="bg-green-600 text-white px-6 py-2 rounded-md font-semibold hover:bg-green-700 disabled:bg-gray-400 transition-colors"
+							class="rounded-md bg-green-600 px-6 py-2 font-semibold text-white transition-colors hover:bg-green-700 disabled:bg-gray-400"
 						>
 							{#if isGenerating}
 								Generating...
@@ -151,7 +193,7 @@
 					{/if}
 					<button
 						on:click={() => goto('/')}
-						class="bg-gray-600 text-white px-6 py-2 rounded-md font-semibold hover:bg-gray-700 transition-colors"
+						class="rounded-md bg-gray-600 px-6 py-2 font-semibold text-white transition-colors hover:bg-gray-700"
 					>
 						Back to Home
 					</button>
@@ -159,20 +201,19 @@
 			</div>
 		</div>
 
-		<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+		<div class="grid grid-cols-1 gap-6 lg:grid-cols-3">
 			<!-- Issuer Groups -->
 			<div class="lg:col-span-1">
-				<div class="bg-white rounded-lg shadow-md p-6">
-					<h2 class="text-lg font-semibold text-gray-900 mb-4" id="issuer-groups">Issuer Groups</h2>
-					<div class="space-y-2 max-h-96 overflow-y-auto" aria-labelledby="issuer-groups">
+				<div class="rounded-lg bg-white p-6 shadow-md">
+					<h2 class="mb-4 text-lg font-semibold text-gray-900" id="issuer-groups">Issuer Groups</h2>
+					<div class="max-h-96 space-y-2 overflow-y-auto" aria-labelledby="issuer-groups">
 						{#each issuerGroups as group}
 							<button
 								on:click={() => selectIssuerGroup(group)}
-								class="w-full text-left p-3 rounded-md border transition-colors {
-									selectedIssuer?.issuer === group.issuer
-										? 'border-blue-500 bg-blue-50'
-										: 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
-								}"
+								class="w-full rounded-md border p-3 text-left transition-colors {selectedIssuer?.issuer ===
+								group.issuer
+									? 'border-blue-500 bg-blue-50'
+									: 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'}"
 							>
 								<div class="font-medium text-gray-900">{group.issuer}</div>
 								<div class="text-sm text-gray-600">
@@ -181,86 +222,71 @@
 							</button>
 						{/each}
 						{#if issuerGroups.length === 0}
-							<p class="text-gray-500 text-center py-4">No remaining transactions</p>
+							<p class="py-4 text-center text-gray-500">No remaining transactions</p>
 						{/if}
 					</div>
 				</div>
 			</div>
 
-			<!-- Transaction Details and Mapping -->
-			<div class="lg:col-span-2">
+			<!-- Account Selection -->
+			<div class="lg:col-span-1">
 				{#if selectedIssuer}
-					<div class="bg-white rounded-lg shadow-md p-6">
-						<h2 class="text-lg font-semibold text-gray-900 mb-4">
-							Map {selectedIssuer.issuer} Transactions
+					<div class="rounded-lg bg-white p-6 shadow-md">
+						<h2 class="mb-4 text-lg font-semibold text-gray-900">
+							Select Account
 						</h2>
-						
-						<!-- Account Selection -->
-						<div class="mb-6">
-							<label for="bulk-account-select" class="block text-sm font-medium text-gray-700 mb-2">
-								Select Account for All {selectedIssuer?.transactions.length || 0} Transactions
-							</label>
-							<AccountSelector
-								id="bulk-account-select"
-								accounts={accounts}
-								bind:selectedAccount={selectedAccount}
-								placeholder="Search for an account..."
-							/>
-							<button
-								on:click={mapTransactions}
-								disabled={!selectedAccount}
-								class="mt-2 w-full bg-blue-600 text-white py-2 px-4 rounded-md font-semibold hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
-							>
-								Map All {selectedIssuer?.transactions.length || 0} Transactions to {selectedAccount || '...'}
-							</button>
-						</div>
-
-						<!-- Individual Transactions -->
-						<div class="space-y-3 max-h-96 overflow-y-auto">
-								<h3 class="text-sm font-medium text-gray-700" id="individual-transactions">Individual Transactions</h3>
-							{#each selectedIssuer.transactions as transaction}
-								<div class="border border-gray-200 rounded-md p-4">
-									<div class="flex justify-between items-start mb-2">
-										<div class="flex-1">
-											<div class="font-medium text-gray-900">{formatDate(transaction.date)}</div>
-											<div class="text-sm text-gray-600">{transaction.description}</div>
-											{#if transaction.counterpartyName}
-												<div class="text-sm text-gray-500">Counterparty: {transaction.counterpartyName}</div>
-											{/if}
+						<fieldset>
+							<legend class="mb-2 block text-sm font-medium text-gray-700">
+								Search Accounts
+							</legend>
+							<!-- Search Input -->
+							<div class="mb-2">
+								<input
+									type="text"
+									placeholder="Search accounts..."
+									bind:value={accountSearchQuery}
+									bind:this={searchInput}
+									class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
+								/>
+							</div>
+							<!-- Account List -->
+							<div class="max-h-96 overflow-y-auto rounded-md border border-gray-300 bg-white">
+								{#each filteredAccounts as account}
+									<label
+										class="flex cursor-pointer items-center border-b border-gray-100 px-3 py-2 last:border-b-0 hover:bg-gray-50"
+									>
+										<input
+											type="radio"
+											name="account-selection"
+											value={account.name}
+											bind:group={selectedAccount}
+											class="mr-3 text-blue-600 focus:ring-blue-500"
+										/>
+										<div>
+											<div class="font-medium text-gray-900">{account.name}</div>
+											<div class="text-xs text-gray-500">{account.type}</div>
 										</div>
-										<div class="text-right">
-											<div class="font-semibold text-gray-900">{formatCurrency(transaction.amount)}</div>
-											<div class="text-xs text-gray-500">
-												{transaction.credit ? 'Credit' : 'Debit'}
-											</div>
-										</div>
+									</label>
+								{/each}
+								{#if filteredAccounts.length === 0}
+									<div class="px-3 py-4 text-center text-sm text-gray-500">
+										No accounts found matching your search
 									</div>
-									<AccountSelector
-										accounts={accounts}
-										selectedAccount={getIndividualSelection(transaction.id)}
-										on:change={(e) => {
-											if (e.detail.account) {
-												setIndividualSelection(transaction.id, e.detail.account);
-												mapIndividualTransaction(transaction, e.detail.account);
-											}
-										}}
-										placeholder="Map individually..."
-										id="individual-{transaction.id}"
-									/>
-								</div>
-							{/each}
-						</div>
+								{/if}
+							</div>
+						</fieldset>
 					</div>
 				{:else}
-					<div class="bg-white rounded-lg shadow-md p-6">
-						<h2 class="text-lg font-semibold text-gray-900 mb-4">Select an Issuer Group</h2>
+					<div class="rounded-lg bg-white p-6 shadow-md">
+						<h2 class="mb-4 text-lg font-semibold text-gray-900">Select an Issuer Group</h2>
 						<p class="text-gray-600">
-							Choose an issuer group from the left panel to start mapping transactions to your beancount accounts.
+							Choose an issuer group from the left panel to start mapping transactions to your
+							beancount accounts.
 						</p>
 						{#if issuerGroups.length === 0}
-							<div class="mt-6 p-4 bg-green-50 border border-green-200 rounded-md">
-								<p class="text-green-800 font-medium">All transactions have been mapped!</p>
-								<p class="text-green-700 text-sm mt-1">
+							<div class="mt-6 rounded-md border border-green-200 bg-green-50 p-4">
+								<p class="font-medium text-green-800">All transactions have been mapped!</p>
+								<p class="mt-1 text-sm text-green-700">
 									You can now download your beancount file with {mapping.size} imported transactions.
 								</p>
 							</div>
@@ -268,44 +294,159 @@
 					</div>
 				{/if}
 			</div>
+
+			<!-- Transaction Details and Mapping -->
+			<div class="lg:col-span-1">
+				{#if selectedIssuer}
+					<div class="rounded-lg bg-white p-6 shadow-md">
+						<h2 class="mb-4 text-lg font-semibold text-gray-900">
+							{selectedIssuer.issuer} Transactions
+						</h2>
+
+						<!-- Map Button -->
+						<div class="mb-4">
+							<button
+								on:click={mapTransactions}
+								disabled={!selectedAccount || checkedTransactions.size === 0}
+								class="w-full rounded-md bg-blue-600 px-4 py-2 font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-gray-400"
+							>
+								Map {checkedTransactions.size} Checked Transaction{checkedTransactions.size !== 1
+									? 's'
+									: ''} to {selectedAccount || '...'}
+							</button>
+						</div>
+
+						<!-- Individual Transactions -->
+						<div class="max-h-96 space-y-3 overflow-y-auto">
+							<div class="mb-3 flex items-center justify-between">
+								<h3 class="text-sm font-medium text-gray-700" id="individual-transactions">
+									Individual Transactions
+								</h3>
+								<div class="flex items-center space-x-2">
+									<fieldset>
+										<legend class="sr-only">Select All Transactions</legend>
+										<input
+											type="checkbox"
+											id="select-all"
+											checked={checkedTransactions.size === selectedIssuer?.transactions.length}
+											on:change={(e) => {
+												const target = e.target as HTMLInputElement;
+												if (target.checked && selectedIssuer) {
+													// Check all transactions
+													const newChecked = new Set(checkedTransactions);
+													selectedIssuer.transactions.forEach((t) => newChecked.add(t.id));
+													checkedTransactions = newChecked;
+												} else {
+													// Uncheck all transactions
+													checkedTransactions = new Set();
+												}
+											}}
+											class="rounded text-blue-600 focus:ring-blue-500"
+										/>
+										<label for="select-all" class="text-sm text-gray-600">Select All</label>
+									</fieldset>
+								</div>
+							</div>
+							{#each selectedIssuer.transactions as transaction}
+								<div class="rounded-md border border-gray-200 p-4">
+									<div class="flex items-start space-x-3">
+										<input
+											type="checkbox"
+											id="transaction-{transaction.id}"
+											checked={checkedTransactions.has(transaction.id)}
+											on:change={(e) => {
+												const target = e.target as HTMLInputElement;
+												const newChecked = new Set(checkedTransactions);
+												if (target.checked) {
+													newChecked.add(transaction.id);
+												} else {
+													newChecked.delete(transaction.id);
+												}
+												checkedTransactions = newChecked;
+											}}
+											class="mt-1 rounded text-blue-600 focus:ring-blue-500"
+										/>
+										<div class="flex-1">
+											<div class="mb-2 flex items-start justify-between">
+												<div class="flex-1">
+													<div class="font-medium text-gray-900">
+														{formatDate(transaction.date)}
+													</div>
+													<div class="text-sm text-gray-600">{transaction.description}</div>
+													{#if transaction.counterpartyName}
+														<div class="text-sm text-gray-500">
+															Counterparty: {transaction.counterpartyName}
+														</div>
+													{/if}
+												</div>
+												<div class="text-right">
+													<div class="font-semibold text-gray-900">
+														{formatCurrency(transaction.amount)}
+													</div>
+													<div class="text-xs text-gray-500">
+														{transaction.credit ? 'Credit' : 'Debit'}
+													</div>
+												</div>
+											</div>
+										</div>
+									</div>
+								</div>
+							{/each}
+						</div>
+					</div>
+				{:else}
+					<div class="rounded-lg bg-white p-6 shadow-md h-full flex items-center justify-center">
+						<p class="text-gray-500 text-center">
+							Select an issuer group to see transactions
+						</p>
+					</div>
+				{/if}
+			</div>
 		</div>
 
 		<!-- Debug Information -->
-		<div class="bg-white rounded-lg shadow-md p-6 mt-6">
-			<h2 class="text-lg font-semibold text-gray-900 mb-4">Debug Information</h2>
+		<div class="mt-6 rounded-lg bg-white p-6 shadow-md">
+			<h2 class="mb-4 text-lg font-semibold text-gray-900">Debug Information</h2>
 			<div class="space-y-4">
 				<div>
-					<h3 class="text-sm font-medium text-gray-700 mb-2">Accounts ({accounts.length})</h3>
-					<div class="bg-gray-50 rounded-md p-3 max-h-48 overflow-y-auto">
+					<h3 class="mb-2 text-sm font-medium text-gray-700">Accounts ({accounts.length})</h3>
+					<div class="max-h-48 overflow-y-auto rounded-md bg-gray-50 p-3">
 						{#if accounts.length > 0}
 							<div class="space-y-1">
 								{#each accounts as account}
 									<div class="text-sm">
 										<span class="font-medium">{account.name}</span>
-										<span class="text-gray-500 ml-2">({account.type})</span>
+										<span class="ml-2 text-gray-500">({account.type})</span>
 									</div>
 								{/each}
 							</div>
 						{:else}
-							<p class="text-sm text-red-600">No accounts found - beancount file may not have been parsed correctly</p>
+							<p class="text-sm text-red-600">
+								No accounts found - beancount file may not have been parsed correctly
+							</p>
 						{/if}
 					</div>
 				</div>
-				
+
 				<div>
-					<h3 class="text-sm font-medium text-gray-700 mb-2">Transactions ({transactions.length})</h3>
-					<div class="bg-gray-50 rounded-md p-3 max-h-32 overflow-y-auto">
+					<h3 class="mb-2 text-sm font-medium text-gray-700">
+						Transactions ({transactions.length})
+					</h3>
+					<div class="max-h-32 overflow-y-auto rounded-md bg-gray-50 p-3">
 						<p class="text-sm text-gray-600">
-							First 3 transactions: {transactions.slice(0, 3).map(t => `${t.issuer}: ${t.description}`).join(' | ')}
+							First 3 transactions: {transactions
+								.slice(0, 3)
+								.map((t) => `${t.issuer}: ${t.description}`)
+								.join(' | ')}
 						</p>
 					</div>
 				</div>
-				
+
 				<div>
-					<h3 class="text-sm font-medium text-gray-700 mb-2">Session Storage Check</h3>
-					<div class="bg-gray-50 rounded-md p-3">
+					<h3 class="mb-2 text-sm font-medium text-gray-700">Session Storage Check</h3>
+					<div class="rounded-md bg-gray-50 p-3">
 						<p class="text-sm text-gray-600">
-							Stored accounts: {sessionStorage.getItem('accounts') ? 'Yes' : 'No'}<br>
+							Stored accounts: {sessionStorage.getItem('accounts') ? 'Yes' : 'No'}<br />
 							Stored transactions: {sessionStorage.getItem('transactions') ? 'Yes' : 'No'}
 						</p>
 					</div>
@@ -314,18 +455,18 @@
 		</div>
 
 		<!-- Progress Summary -->
-		<div class="bg-white rounded-lg shadow-md p-6 mt-6">
-			<h2 class="text-lg font-semibold text-gray-900 mb-4">Import Progress</h2>
-			<div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-				<div class="text-center p-4 bg-gray-50 rounded-md">
+		<div class="mt-6 rounded-lg bg-white p-6 shadow-md">
+			<h2 class="mb-4 text-lg font-semibold text-gray-900">Import Progress</h2>
+			<div class="grid grid-cols-1 gap-4 md:grid-cols-3">
+				<div class="rounded-md bg-gray-50 p-4 text-center">
 					<div class="text-2xl font-bold text-gray-900">{transactions.length}</div>
 					<div class="text-sm text-gray-600">Total Transactions</div>
 				</div>
-				<div class="text-center p-4 bg-blue-50 rounded-md">
+				<div class="rounded-md bg-blue-50 p-4 text-center">
 					<div class="text-2xl font-bold text-blue-600">{mapping.size}</div>
 					<div class="text-sm text-blue-600">Mapped Transactions</div>
 				</div>
-				<div class="text-center p-4 bg-orange-50 rounded-md">
+				<div class="rounded-md bg-orange-50 p-4 text-center">
 					<div class="text-2xl font-bold text-orange-600">{remainingTransactions.length}</div>
 					<div class="text-sm text-orange-600">Remaining Transactions</div>
 				</div>
