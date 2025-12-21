@@ -183,3 +183,11 @@ export function generateBeancountFile(
 	
 	return lines.join('\n');
 }
+
+export function formatDate(date: Date): string {
+	return format(date, 'dd/MM/yyyy');
+}
+
+export function formatCurrency(amount: number): string {
+	return `€${amount.toFixed(2).replace('.', ',')}`;
+}

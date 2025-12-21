@@ -1,9 +1,17 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { groupTransactionsByIssuer, generateBeancountFile } from '$lib/utils';
-	import AccountSelector from '$lib/components/AccountSelector.svelte';
-	import type { ParsedTransaction, BeancountAccount, IssuerGroup } from '$lib/types';
+	import type { BeancountAccount, IssuerGroup, ParsedTransaction } from '$lib/types';
+	import {
+		parseCSV,
+		parseBeancountFile,
+		generateBeancountFile,
+		groupTransactionsByIssuer,
+		formatDate,
+		formatCurrency
+	} from '$lib/utils';
+
+	let accountListRef: HTMLDivElement;
 
 	let transactions: ParsedTransaction[] = [];
 	let accounts: BeancountAccount[] = [];
@@ -29,7 +37,40 @@
 	let undoHistory: UndoAction[] = [];
 	let maxUndoHistory = 50;
 
-	onMount(() => {
+	// Global key handler for Enter and arrow navigation
+	function handleGlobalKeydown(e: KeyboardEvent) {
+		if (!selectedIssuer) return;
+
+		// Handle Enter key for mapping
+		if (e.key === 'Enter') {
+			e.preventDefault();
+			if (selectedAccount && checkedTransactions.size > 0) {
+				mapTransactions();
+			}
+			return;
+		}
+
+		// Handle arrow key navigation between search and account list
+		if (e.key === 'ArrowDown' && document.activeElement === searchInput) {
+			e.preventDefault();
+			// Focus first account in list
+			const firstAccount = accountListRef?.querySelector('input[type="radio"]') as HTMLInputElement;
+			if (firstAccount) {
+				firstAccount.focus();
+			}
+		}
+
+		if (e.key === 'ArrowUp' && accountListRef?.contains(document.activeElement)) {
+			e.preventDefault();
+			// Focus back to search input
+			if (searchInput) {
+				searchInput.focus();
+				searchInput.select();
+			}
+		}
+	}
+
+	onMount(async () => {
 		// Load data from session storage
 		const storedTransactions = sessionStorage.getItem('transactions');
 		const storedAccounts = sessionStorage.getItem('accounts');
@@ -39,17 +80,30 @@
 			return;
 		}
 
-		transactions = JSON.parse(storedTransactions);
-		accounts = JSON.parse(storedAccounts);
-
-		// Convert date strings back to Date objects
-		transactions = transactions.map((t) => ({
-			...t,
-			date: new Date(t.date)
-		}));
-
-		remainingTransactions = [...transactions];
+		// Parse and set data - session storage contains JSON data, not raw file content
+		const parsedTransactions = JSON.parse(storedTransactions);
+		const parsedAccounts = JSON.parse(storedAccounts);
+		
+		// Debug the raw session storage data
+		console.log('Raw stored transactions type:', typeof storedTransactions);
+		console.log('Raw stored accounts type:', typeof storedAccounts);
+		console.log('Parsed transactions type:', typeof parsedTransactions);
+		console.log('Parsed accounts type:', typeof parsedAccounts);
+		
+		// Debug logging
+		console.log('Parsed transactions count:', parsedTransactions.length);
+		console.log('Parsed accounts count:', parsedAccounts.length);
+		
+		transactions = parsedTransactions;
+		accounts = parsedAccounts;
+		remainingTransactions = [...parsedTransactions];
+		
+		// Force reactive update by explicitly setting filteredAccounts
+		filteredAccounts = parsedAccounts;
+		
 		updateIssuerGroups();
+		
+		console.log('Data assignment complete - transactions:', transactions.length, 'accounts:', accounts.length);
 	});
 
 	function updateIssuerGroups() {
@@ -59,6 +113,7 @@
 	function selectIssuerGroup(group: IssuerGroup) {
 		selectedIssuer = group;
 		selectedAccount = '';
+		accountSearchQuery = ''; // Clear search query when changing issuer
 		// Preselect all transactions for this issuer
 		const newChecked = new Set<string>();
 		group.transactions.forEach(t => newChecked.add(t.id));
@@ -104,6 +159,9 @@
 		
 		// Auto-advance to next issuer if available
 		if (issuerGroups.length > 0) {
+			// Clear search query before advancing
+			accountSearchQuery = '';
+			
 			// Select the first available issuer group
 			selectIssuerGroup(issuerGroups[0]);
 			
@@ -118,6 +176,7 @@
 			// No more issuers, clear selection
 			selectedIssuer = null;
 			selectedAccount = '';
+			accountSearchQuery = '';
 		}
 	}
 
@@ -179,6 +238,7 @@
 
 	// Reactive statement to filter accounts based on search query and auto-select when only one account
 	$: {
+		console.log('Reactive statement running - accounts.length:', accounts.length, 'searchQuery:', accountSearchQuery);
 		if (accountSearchQuery.trim() === '') {
 			filteredAccounts = accounts;
 		} else {
@@ -188,6 +248,8 @@
 				account.type.toLowerCase().includes(query)
 			);
 		}
+		
+		console.log('filteredAccounts.length after filtering:', filteredAccounts.length);
 		
 		// Auto-select account when only one account exists and no account is selected
 		if (filteredAccounts.length === 1 && !selectedAccount && selectedIssuer) {
@@ -213,17 +275,7 @@
 		}
 	}
 
-	function formatCurrency(amount: number): string {
-		return new Intl.NumberFormat('nl-BE', {
-			style: 'currency',
-			currency: 'EUR'
-		}).format(amount);
-	}
-
-	function formatDate(date: Date): string {
-		return new Intl.DateTimeFormat('nl-BE').format(date);
-	}
-
+	
 	function getAccountTypeName(type: string): string {
 		return type.charAt(0).toUpperCase() + type.slice(1);
 	}
@@ -319,14 +371,22 @@
 									bind:this={searchInput}
 									on:keydown={(e) => {
 										if (e.key === 'Enter' && selectedAccount && checkedTransactions.size > 0) {
+											e.preventDefault();
 											mapTransactions();
+										}
+										if (e.key === 'ArrowDown') {
+											e.preventDefault();
+											const firstAccount = accountListRef?.querySelector('input[type="radio"]') as HTMLInputElement;
+											if (firstAccount) {
+												firstAccount.focus();
+											}
 										}
 									}}
 									class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
 								/>
 							</div>
 							<!-- Account List -->
-							<div class="max-h-96 overflow-y-auto rounded-md border border-gray-300 bg-white">
+							<div class="max-h-96 overflow-y-auto rounded-md border border-gray-300 bg-white" bind:this={accountListRef}>
 								{#each filteredAccounts as account}
 									<label
 										class="flex cursor-pointer items-center border-b border-gray-100 px-3 py-2 last:border-b-0 hover:bg-gray-50"
@@ -336,6 +396,19 @@
 											name="account-selection"
 											value={account.name}
 											bind:group={selectedAccount}
+											on:keydown={(e) => {
+												if (e.key === 'Enter' && selectedAccount && checkedTransactions.size > 0) {
+													e.preventDefault();
+													mapTransactions();
+												}
+												if (e.key === 'ArrowUp') {
+													e.preventDefault();
+													if (searchInput) {
+														searchInput.focus();
+														searchInput.select();
+													}
+												}
+											}}
 											class="mr-3 text-blue-600 focus:ring-blue-500"
 										/>
 										<div>
