@@ -17,6 +17,17 @@
 	let accountSearchQuery: string = '';
 	let filteredAccounts: BeancountAccount[] = [];
 	let searchInput: HTMLInputElement;
+	
+	// Undo functionality
+	interface UndoAction {
+		type: 'map';
+		transactionIds: string[];
+		account: string;
+		timestamp: number;
+	}
+	
+	let undoHistory: UndoAction[] = [];
+	let maxUndoHistory = 50;
 
 	onMount(() => {
 		// Load data from session storage
@@ -64,6 +75,17 @@
 
 		if (transactionsToMap.length === 0) return;
 
+		// Record undo action before mapping
+		const undoAction: UndoAction = {
+			type: 'map',
+			transactionIds: transactionsToMap.map(t => t.id),
+			account: selectedAccount,
+			timestamp: Date.now()
+		};
+		
+		// Add to undo history
+		undoHistory = [...undoHistory, undoAction].slice(-maxUndoHistory);
+
 		// Map checked transactions to the selected account
 		for (const transaction of transactionsToMap) {
 			mapping.set(transaction.id, selectedAccount);
@@ -99,6 +121,42 @@
 		}
 	}
 
+	function undoLastAction() {
+		if (undoHistory.length === 0) return;
+		
+		const lastAction = undoHistory[undoHistory.length - 1];
+		
+		if (lastAction.type === 'map') {
+			// Unmap the transactions
+			for (const transactionId of lastAction.transactionIds) {
+				mapping.delete(transactionId);
+			}
+			
+			// Find the transactions and add them back to remaining
+			const unmappedTransactions = transactions.filter(t => 
+				lastAction.transactionIds.includes(t.id)
+			);
+			
+			remainingTransactions = [...remainingTransactions, ...unmappedTransactions];
+			
+			// Update issuer groups
+			updateIssuerGroups();
+			
+			// Remove from undo history
+			undoHistory = undoHistory.slice(0, -1);
+			
+			// Select the issuer group that contains the unmapped transactions
+			if (unmappedTransactions.length > 0) {
+				const issuerGroup = issuerGroups.find(group => 
+					group.transactions.some(t => unmappedTransactions.some(ut => ut.id === t.id))
+				);
+				if (issuerGroup) {
+					selectIssuerGroup(issuerGroup);
+				}
+			}
+		}
+	}
+
 	function mapIndividualTransaction(transaction: ParsedTransaction, account: string) {
 		mapping.set(transaction.id, account);
 
@@ -119,7 +177,7 @@
 		individualSelections.set(transactionId, account);
 	}
 
-	// Reactive statement to filter accounts based on search query
+	// Reactive statement to filter accounts based on search query and auto-select when only one account
 	$: {
 		if (accountSearchQuery.trim() === '') {
 			filteredAccounts = accounts;
@@ -129,6 +187,11 @@
 				account.name.toLowerCase().includes(query) ||
 				account.type.toLowerCase().includes(query)
 			);
+		}
+		
+		// Auto-select account when only one account exists and no account is selected
+		if (filteredAccounts.length === 1 && !selectedAccount && selectedIssuer) {
+			selectedAccount = filteredAccounts[0].name;
 		}
 	}
 
@@ -191,6 +254,14 @@
 							{/if}
 						</button>
 					{/if}
+					{#if undoHistory.length > 0}
+						<button
+							on:click={undoLastAction}
+							class="rounded-md bg-orange-600 px-6 py-2 font-semibold text-white transition-colors hover:bg-orange-700"
+						>
+							Undo Last ({undoHistory.length})
+						</button>
+					{/if}
 					<button
 						on:click={() => goto('/')}
 						class="rounded-md bg-gray-600 px-6 py-2 font-semibold text-white transition-colors hover:bg-gray-700"
@@ -246,6 +317,11 @@
 									placeholder="Search accounts..."
 									bind:value={accountSearchQuery}
 									bind:this={searchInput}
+									on:keydown={(e) => {
+										if (e.key === 'Enter' && selectedAccount && checkedTransactions.size > 0) {
+											mapTransactions();
+										}
+									}}
 									class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
 								/>
 							</div>
