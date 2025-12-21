@@ -31,7 +31,7 @@
 			console.log('Parsed accounts:', accounts);
 
 			// Store data in session storage for the import page
-			sessionStorage.setItem('transactions', JSON.stringify(transactions));
+			sessionStorage.setItem('transactions', JSON.stringify(transactions.slice(0, 10)));
 			sessionStorage.setItem('accounts', JSON.stringify(accounts));
 			console.log('Data stored in session storage');
 
@@ -70,16 +70,16 @@
 	}
 </script>
 
-<div class="min-h-screen bg-gray-50 py-12 px-4">
-	<div class="max-w-2xl mx-auto">
-		<div class="bg-white rounded-lg shadow-md p-8">
-			<h1 class="text-3xl font-bold text-gray-900 mb-2">Bean Import</h1>
-			<p class="text-gray-600 mb-8">Transform accounting statements into beancount format</p>
+<div class="min-h-screen bg-gray-50 px-4 py-12">
+	<div class="mx-auto max-w-2xl">
+		<div class="rounded-lg bg-white p-8 shadow-md">
+			<h1 class="mb-2 text-3xl font-bold text-gray-900">Bean Import</h1>
+			<p class="mb-8 text-gray-600">Transform accounting statements into beancount format</p>
 
 			<div class="space-y-6">
 				<!-- CSV File Upload -->
 				<div>
-					<label for="csv-file" class="block text-sm font-medium text-gray-700 mb-2">
+					<label for="csv-file" class="mb-2 block text-sm font-medium text-gray-700">
 						Accounting Statements (CSV)
 					</label>
 					<input
@@ -87,7 +87,7 @@
 						id="csv-file"
 						accept=".csv"
 						on:change={handleCSVFileChange}
-						class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+						class="block w-full text-sm text-gray-500 file:mr-4 file:rounded-md file:border-0 file:bg-blue-50 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-blue-700 hover:file:bg-blue-100"
 					/>
 					{#if csvFile}
 						<p class="mt-2 text-sm text-green-600">Selected: {csvFile.name}</p>
@@ -96,7 +96,7 @@
 
 				<!-- Beancount File Upload -->
 				<div>
-					<label for="beancount-file" class="block text-sm font-medium text-gray-700 mb-2">
+					<label for="beancount-file" class="mb-2 block text-sm font-medium text-gray-700">
 						Beancount File (.bean or .beancount)
 					</label>
 					<input
@@ -104,7 +104,7 @@
 						id="beancount-file"
 						accept=".bean,.beancount"
 						on:change={handleBeancountFileChange}
-						class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+						class="block w-full text-sm text-gray-500 file:mr-4 file:rounded-md file:border-0 file:bg-blue-50 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-blue-700 hover:file:bg-blue-100"
 					/>
 					{#if beancountFile}
 						<p class="mt-2 text-sm text-green-600">Selected: {beancountFile.name}</p>
@@ -113,7 +113,7 @@
 
 				<!-- Error Display -->
 				{#if error}
-					<div class="bg-red-50 border border-red-200 rounded-md p-4">
+					<div class="rounded-md border border-red-200 bg-red-50 p-4">
 						<p class="text-sm text-red-600">{error}</p>
 					</div>
 				{/if}
@@ -123,7 +123,7 @@
 					<button
 						on:click={handleStartImport}
 						disabled={!csvFile || !beancountFile || isLoading}
-						class="w-full bg-blue-600 text-white py-3 px-4 rounded-md font-semibold hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+						class="w-full rounded-md bg-blue-600 px-4 py-3 font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-gray-400"
 					>
 						{#if isLoading}
 							Processing files...
@@ -134,9 +134,9 @@
 				</div>
 
 				<!-- Instructions -->
-				<div class="mt-8 p-4 bg-blue-50 rounded-md">
-					<h3 class="text-sm font-semibold text-blue-900 mb-2">Instructions</h3>
-					<ol class="text-sm text-blue-800 space-y-1 list-decimal list-inside">
+				<div class="mt-8 rounded-md bg-blue-50 p-4">
+					<h3 class="mb-2 text-sm font-semibold text-blue-900">Instructions</h3>
+					<ol class="list-inside list-decimal space-y-1 text-sm text-blue-800">
 						<li>Upload your accounting statements CSV file</li>
 						<li>Upload your existing beancount file to extract accounts</li>
 						<li>Click "Start Import Process" to begin mapping transactions</li>

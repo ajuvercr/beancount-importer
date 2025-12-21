@@ -118,6 +118,14 @@
 		const newChecked = new Set<string>();
 		group.transactions.forEach(t => newChecked.add(t.id));
 		checkedTransactions = newChecked;
+		
+		// Focus the search input after selecting issuer
+		setTimeout(() => {
+			if (searchInput) {
+				searchInput.focus();
+				searchInput.select();
+			}
+		}, 50);
 	}
 
 	function mapTransactions() {
@@ -129,6 +137,13 @@
 		);
 
 		if (transactionsToMap.length === 0) return;
+
+		// Debug logging
+		console.log('mapTransactions called:');
+		console.log('- selectedIssuer:', selectedIssuer.issuer);
+		console.log('- selectedAccount:', selectedAccount);
+		console.log('- transactionsToMap:', transactionsToMap.length);
+		console.log('- issuerGroups before mapping:', issuerGroups.length);
 
 		// Record undo action before mapping
 		const undoAction: UndoAction = {
@@ -154,16 +169,38 @@
 		// Clear checked transactions
 		checkedTransactions = new Set();
 
+		// Get the current issuer index BEFORE updating issuer groups
+		const currentIndex = issuerGroups.findIndex(group => group.issuer === selectedIssuer?.issuer);
+		console.log('- currentIndex before update:', currentIndex);
+		
 		// Update issuer groups
 		updateIssuerGroups();
+		
+		// Debug logging after update
+		console.log('- issuerGroups after update:', issuerGroups.length);
+		console.log('- remainingTransactions:', remainingTransactions.length);
+		console.log('- mapping.size after mapping:', mapping.size);
 		
 		// Auto-advance to next issuer if available
 		if (issuerGroups.length > 0) {
 			// Clear search query before advancing
 			accountSearchQuery = '';
 			
-			// Select the first available issuer group
-			selectIssuerGroup(issuerGroups[0]);
+			// Calculate next index based on original position
+			let nextIndex;
+			if (currentIndex >= 0) {
+				// If the issuer was removed, the next issuer takes its position
+				nextIndex = currentIndex < issuerGroups.length ? currentIndex : 0;
+			} else {
+				// Fallback to first if something went wrong
+				nextIndex = 0;
+			}
+			
+			console.log('- nextIndex:', nextIndex);
+			console.log('- next issuer:', issuerGroups[nextIndex]?.issuer);
+			
+			// Select the next issuer group (or wrap to first if at end)
+			selectIssuerGroup(issuerGroups[nextIndex]);
 			
 			// Focus the search input after a short delay to ensure DOM is updated
 			setTimeout(() => {
@@ -171,7 +208,7 @@
 					searchInput.focus();
 					searchInput.select();
 				}
-			}, 50);
+			}, 100);
 		} else {
 			// No more issuers, clear selection
 			selectedIssuer = null;
@@ -378,6 +415,9 @@
 											e.preventDefault();
 											const firstAccount = accountListRef?.querySelector('input[type="radio"]') as HTMLInputElement;
 											if (firstAccount) {
+												// Select the first account by setting its value
+												selectedAccount = firstAccount.value;
+												// Then focus it for visual feedback
 												firstAccount.focus();
 											}
 										}
@@ -403,9 +443,41 @@
 												}
 												if (e.key === 'ArrowUp') {
 													e.preventDefault();
-													if (searchInput) {
-														searchInput.focus();
-														searchInput.select();
+													// Get all radio buttons in the list
+													const allRadioButtons = Array.from(accountListRef?.querySelectorAll('input[type="radio"]') || []) as HTMLInputElement[];
+													const currentIndex = allRadioButtons.indexOf(e.target as HTMLInputElement);
+													
+													// If at the first radio button, go to search field
+													if (currentIndex === 0) {
+														// Deselect the account when going to search field
+														selectedAccount = '';
+														if (searchInput) {
+															searchInput.focus();
+															searchInput.select();
+														}
+													} else {
+														// Move to previous radio button
+														const prevButton = allRadioButtons[currentIndex - 1];
+														if (prevButton) {
+															selectedAccount = prevButton.value;
+															prevButton.focus();
+														}
+													}
+												}
+												if (e.key === 'ArrowDown') {
+													e.preventDefault();
+													// Get all radio buttons in the list
+													const allRadioButtons = Array.from(accountListRef?.querySelectorAll('input[type="radio"]') || []) as HTMLInputElement[];
+													const currentIndex = allRadioButtons.indexOf(e.target as HTMLInputElement);
+													
+													// If at the last radio button, stay there (or could wrap around)
+													if (currentIndex < allRadioButtons.length - 1) {
+														// Move to next radio button
+														const nextButton = allRadioButtons[currentIndex + 1];
+														if (nextButton) {
+															selectedAccount = nextButton.value;
+															nextButton.focus();
+														}
 													}
 												}
 											}}
@@ -438,6 +510,19 @@
 								<p class="mt-1 text-sm text-green-700">
 									You can now download your beancount file with {mapping.size} imported transactions.
 								</p>
+								<div class="mt-4">
+									<button
+										on:click={generateAndDownload}
+										disabled={isGenerating}
+										class="rounded-md bg-green-600 px-6 py-2 font-semibold text-white transition-colors hover:bg-green-700 disabled:bg-gray-400"
+									>
+										{#if isGenerating}
+											Generating...
+										{:else}
+											Download Beancount File ({mapping.size} transactions)
+										{/if}
+									</button>
+								</div>
 							</div>
 						{/if}
 					</div>
