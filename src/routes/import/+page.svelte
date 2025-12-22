@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import type { BeancountAccount, IssuerGroup, ParsedTransaction } from '$lib/types';
 	import {
@@ -8,10 +8,13 @@
 		generateBeancountFile,
 		groupTransactionsByIssuer,
 		formatDate,
-		formatCurrency
+		formatCurrency,
+		getTransactionTypeColor,
+		getTransactionTypeBadgeColor
 	} from '$lib/utils';
 
 	let accountListRef: HTMLDivElement;
+	let issuerGroupsRef: HTMLDivElement;
 
 	let transactions: ParsedTransaction[] = [];
 	let accounts: BeancountAccount[] = [];
@@ -37,12 +40,27 @@
 	let undoHistory: UndoAction[] = [];
 	let maxUndoHistory = 50;
 
-	// Global key handler for Enter and arrow navigation
+	// Global key handler for all keyboard navigation
 	function handleGlobalKeydown(e: KeyboardEvent) {
-		if (!selectedIssuer) return;
+		// Handle Shift+Arrow keys for issuer group navigation
+		if (e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+			if (!selectedIssuer) return;
+			e.preventDefault();
+			const currentIndex = issuerGroups.findIndex(group => group.issuer === selectedIssuer?.issuer);
+			
+			if (e.key === 'ArrowUp' && currentIndex > 0) {
+				// Go to previous issuer group
+				selectIssuerGroup(issuerGroups[currentIndex - 1]);
+			} else if (e.key === 'ArrowDown' && currentIndex < issuerGroups.length - 1) {
+				// Go to next issuer group
+				selectIssuerGroup(issuerGroups[currentIndex + 1]);
+			}
+			return;
+		}
 
 		// Handle Enter key for mapping
 		if (e.key === 'Enter') {
+			if (!selectedIssuer) return;
 			e.preventDefault();
 			if (selectedAccount && checkedTransactions.size > 0) {
 				mapTransactions();
@@ -53,24 +71,67 @@
 		// Handle arrow key navigation between search and account list
 		if (e.key === 'ArrowDown' && document.activeElement === searchInput) {
 			e.preventDefault();
-			// Focus first account in list
+			// Focus and select first account in list
+			const firstAccount = accountListRef?.querySelector('input[type="radio"]') as HTMLInputElement;
+			if (firstAccount) {
+				selectedAccount = firstAccount.value;
+				firstAccount.focus();
+			}
+			return;
+		}
+
+		// Handle arrow key navigation within account list
+		if (accountListRef?.contains(document.activeElement) && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+			const allRadioButtons = Array.from(accountListRef.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
+			const currentIndex = allRadioButtons.indexOf(e.target as HTMLInputElement);
+			
+			if (e.key === 'ArrowUp') {
+				e.preventDefault();
+				if (currentIndex === 0) {
+					// At first radio button, go to search field
+					selectedAccount = '';
+					if (searchInput) {
+						searchInput.focus();
+						searchInput.select();
+					}
+				} else if (currentIndex > 0) {
+					// Move to previous radio button
+					const prevButton = allRadioButtons[currentIndex - 1];
+					if (prevButton) {
+						selectedAccount = prevButton.value;
+						prevButton.focus();
+					}
+				}
+			} else if (e.key === 'ArrowDown') {
+				e.preventDefault();
+				if (currentIndex < allRadioButtons.length - 1) {
+					// Move to next radio button
+					const nextButton = allRadioButtons[currentIndex + 1];
+					if (nextButton) {
+						selectedAccount = nextButton.value;
+						nextButton.focus();
+					}
+				}
+			}
+			return;
+		}
+
+		// Handle ArrowDown from search input when no account selected
+		if (e.key === 'ArrowDown' && document.activeElement === searchInput && filteredAccounts.length === 1 && !selectedAccount && selectedIssuer) {
+			e.preventDefault();
+			selectedAccount = filteredAccounts[0].name;
+			// Focus the first account for visual feedback
 			const firstAccount = accountListRef?.querySelector('input[type="radio"]') as HTMLInputElement;
 			if (firstAccount) {
 				firstAccount.focus();
 			}
 		}
-
-		if (e.key === 'ArrowUp' && accountListRef?.contains(document.activeElement)) {
-			e.preventDefault();
-			// Focus back to search input
-			if (searchInput) {
-				searchInput.focus();
-				searchInput.select();
-			}
-		}
 	}
 
 	onMount(async () => {
+		// Add global key event listener
+		document.addEventListener('keydown', handleGlobalKeydown);
+		
 		// Load data from session storage
 		const storedTransactions = sessionStorage.getItem('transactions');
 		const storedAccounts = sessionStorage.getItem('accounts');
@@ -106,6 +167,11 @@
 		console.log('Data assignment complete - transactions:', transactions.length, 'accounts:', accounts.length);
 	});
 
+	onDestroy(() => {
+		// Clean up global key event listener
+		document.removeEventListener('keydown', handleGlobalKeydown);
+	});
+
 	function updateIssuerGroups() {
 		issuerGroups = groupTransactionsByIssuer(remainingTransactions);
 	}
@@ -119,8 +185,14 @@
 		group.transactions.forEach(t => newChecked.add(t.id));
 		checkedTransactions = newChecked;
 		
-		// Focus the search input after selecting issuer
+		// Scroll the selected issuer into view
 		setTimeout(() => {
+			const selectedButton = issuerGroupsRef?.querySelector(`button[data-issuer="${group.issuer}"]`) as HTMLButtonElement;
+			if (selectedButton) {
+				selectedButton.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+			}
+			
+			// Focus the search input after selecting issuer
 			if (searchInput) {
 				searchInput.focus();
 				searchInput.select();
@@ -278,20 +350,37 @@
 		console.log('Reactive statement running - accounts.length:', accounts.length, 'searchQuery:', accountSearchQuery);
 		if (accountSearchQuery.trim() === '') {
 			filteredAccounts = accounts;
+			selectedAccount = ''; // Clear selection when query is empty
 		} else {
-			const query = accountSearchQuery.toLowerCase();
-			filteredAccounts = accounts.filter(account => 
-				account.name.toLowerCase().includes(query) ||
-				account.type.toLowerCase().includes(query)
+			const query = accountSearchQuery.trim();
+			
+			// Filter accounts that match the query
+			const matchingAccounts = accounts.filter(account => 
+				fuzzyMatch(query, account.name) ||
+				fuzzyMatch(query, account.type)
 			);
+			
+			// Sort by fuzzy score (higher score = more relevant)
+			filteredAccounts = matchingAccounts
+				.map(account => ({
+					account,
+					score: Math.max(
+						fuzzyScore(query, account.name),
+						fuzzyScore(query, account.type)
+					)
+				}))
+				.sort((a, b) => b.score - a.score)
+				.map(item => item.account);
+			
+			// Auto-select first account when typing a query
+			if (filteredAccounts.length > 0 && selectedIssuer) {
+				selectedAccount = filteredAccounts[0].name;
+			} else {
+				selectedAccount = '';
+			}
 		}
 		
 		console.log('filteredAccounts.length after filtering:', filteredAccounts.length);
-		
-		// Auto-select account when only one account exists and no account is selected
-		if (filteredAccounts.length === 1 && !selectedAccount && selectedIssuer) {
-			selectedAccount = filteredAccounts[0].name;
-		}
 	}
 
 	async function generateAndDownload() {
@@ -312,9 +401,98 @@
 		}
 	}
 
-	
-	function getAccountTypeName(type: string): string {
-		return type.charAt(0).toUpperCase() + type.slice(1);
+	function getCreditDebitColor(isCredit: boolean): string {
+		return isCredit ? 'text-green-600' : 'text-red-600';
+	}
+
+	function getCreditDebitPrefix(isCredit: boolean): string {
+		return isCredit ? '+' : '-';
+	}
+
+	function getIssuerGroupAmountColor(group: IssuerGroup): string {
+		// Determine if this group is mostly credits or debits
+		const creditCount = group.transactions.filter(t => t.credit).length;
+		const debitCount = group.transactions.filter(t => !t.credit).length;
+		
+		// If mostly credits (money received), use green; if mostly debits (money paid), use red
+		return creditCount > debitCount ? 'text-green-600' : 'text-red-600';
+	}
+
+	function fuzzyMatch(query: string, text: string): boolean {
+		// Remove non-alphanumeric characters and convert to lowercase
+		const cleanQuery = query.toLowerCase().replace(/[^a-z0-9]/g, '');
+		const cleanText = text.toLowerCase().replace(/[^a-z0-9]/g, '');
+		
+		// If query is empty, return true
+		if (cleanQuery.length === 0) return true;
+		
+		// Check if all characters from query appear in order in text
+		let queryIndex = 0;
+		for (let i = 0; i < cleanText.length && queryIndex < cleanQuery.length; i++) {
+			if (cleanText[i] === cleanQuery[queryIndex]) {
+				queryIndex++;
+			}
+		}
+		
+		// Return true if all query characters were found in order
+		return queryIndex === cleanQuery.length;
+	}
+
+	function fuzzyScore(query: string, text: string): number {
+		// Remove non-alphanumeric characters and convert to lowercase
+		const cleanQuery = query.toLowerCase().replace(/[^a-z0-9]/g, '');
+		const cleanText = text.toLowerCase().replace(/[^a-z0-9]/g, '');
+		
+		// If query is empty, return 0 (no score)
+		if (cleanQuery.length === 0) return 0;
+		
+		// Calculate fuzzy score based on:
+		// 1. Exact match bonus
+		// 2. Starting match bonus  
+		// 3. Sequential character matches
+		// 4. Character proximity
+		
+		let score = 0;
+		let queryIndex = 0;
+		let lastMatchIndex = -1;
+		
+		// Exact match gets highest score
+		if (cleanText === cleanQuery) {
+			return 1000;
+		}
+		
+		// Starting match gets high bonus
+		if (cleanText.startsWith(cleanQuery)) {
+			score += 500;
+		}
+		
+		// Sequential character matching
+		for (let i = 0; i < cleanText.length && queryIndex < cleanQuery.length; i++) {
+			if (cleanText[i] === cleanQuery[queryIndex]) {
+				queryIndex++;
+				
+				// Bonus for consecutive matches
+				if (lastMatchIndex === i - 1) {
+					score += 10;
+				} else {
+					// Penalty for gaps between matches
+					const gap = i - lastMatchIndex;
+					score += Math.max(1, 10 - gap);
+				}
+				
+				lastMatchIndex = i;
+			}
+		}
+		
+		// If all characters matched, add completion bonus
+		if (queryIndex === cleanQuery.length) {
+			score += 100;
+			
+			// Bonus for shorter text (higher relevance)
+			score += Math.max(0, 50 - cleanText.length);
+		}
+		
+		return score;
 	}
 </script>
 
@@ -366,18 +544,26 @@
 			<div class="lg:col-span-1">
 				<div class="rounded-lg bg-white p-6 shadow-md">
 					<h2 class="mb-4 text-lg font-semibold text-gray-900" id="issuer-groups">Issuer Groups</h2>
-					<div class="max-h-96 space-y-2 overflow-y-auto" aria-labelledby="issuer-groups">
+					<div class="max-h-96 space-y-2 overflow-y-auto" aria-labelledby="issuer-groups" bind:this={issuerGroupsRef}>
 						{#each issuerGroups as group}
 							<button
+								data-issuer={group.issuer}
 								on:click={() => selectIssuerGroup(group)}
 								class="w-full rounded-md border p-3 text-left transition-colors {selectedIssuer?.issuer ===
 								group.issuer
 									? 'border-blue-500 bg-blue-50'
-									: 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'}"
+									: getTransactionTypeColor(group.transactionType)}"
 							>
-								<div class="font-medium text-gray-900">{group.issuer}</div>
+								<div class="flex items-center justify-between">
+									<div class="font-medium text-gray-900">{group.issuer}</div>
+									{#if group.transactionType}
+										<span class="rounded-full px-2 py-1 text-xs font-medium {getTransactionTypeBadgeColor(group.transactionType)}">
+											{group.transactionType}
+										</span>
+									{/if}
+								</div>
 								<div class="text-sm text-gray-600">
-									{group.transactions.length} transactions • {formatCurrency(group.totalAmount)}
+									{group.transactions.length} transactions • <span class="{getIssuerGroupAmountColor(group)}">{formatCurrency(group.totalAmount)}</span>
 								</div>
 							</button>
 						{/each}
@@ -406,22 +592,6 @@
 									placeholder="Search accounts..."
 									bind:value={accountSearchQuery}
 									bind:this={searchInput}
-									on:keydown={(e) => {
-										if (e.key === 'Enter' && selectedAccount && checkedTransactions.size > 0) {
-											e.preventDefault();
-											mapTransactions();
-										}
-										if (e.key === 'ArrowDown') {
-											e.preventDefault();
-											const firstAccount = accountListRef?.querySelector('input[type="radio"]') as HTMLInputElement;
-											if (firstAccount) {
-												// Select the first account by setting its value
-												selectedAccount = firstAccount.value;
-												// Then focus it for visual feedback
-												firstAccount.focus();
-											}
-										}
-									}}
 									class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
 								/>
 							</div>
@@ -436,51 +606,6 @@
 											name="account-selection"
 											value={account.name}
 											bind:group={selectedAccount}
-											on:keydown={(e) => {
-												if (e.key === 'Enter' && selectedAccount && checkedTransactions.size > 0) {
-													e.preventDefault();
-													mapTransactions();
-												}
-												if (e.key === 'ArrowUp') {
-													e.preventDefault();
-													// Get all radio buttons in the list
-													const allRadioButtons = Array.from(accountListRef?.querySelectorAll('input[type="radio"]') || []) as HTMLInputElement[];
-													const currentIndex = allRadioButtons.indexOf(e.target as HTMLInputElement);
-													
-													// If at the first radio button, go to search field
-													if (currentIndex === 0) {
-														// Deselect the account when going to search field
-														selectedAccount = '';
-														if (searchInput) {
-															searchInput.focus();
-															searchInput.select();
-														}
-													} else {
-														// Move to previous radio button
-														const prevButton = allRadioButtons[currentIndex - 1];
-														if (prevButton) {
-															selectedAccount = prevButton.value;
-															prevButton.focus();
-														}
-													}
-												}
-												if (e.key === 'ArrowDown') {
-													e.preventDefault();
-													// Get all radio buttons in the list
-													const allRadioButtons = Array.from(accountListRef?.querySelectorAll('input[type="radio"]') || []) as HTMLInputElement[];
-													const currentIndex = allRadioButtons.indexOf(e.target as HTMLInputElement);
-													
-													// If at the last radio button, stay there (or could wrap around)
-													if (currentIndex < allRadioButtons.length - 1) {
-														// Move to next radio button
-														const nextButton = allRadioButtons[currentIndex + 1];
-														if (nextButton) {
-															selectedAccount = nextButton.value;
-															nextButton.focus();
-														}
-													}
-												}
-											}}
 											class="mr-3 text-blue-600 focus:ring-blue-500"
 										/>
 										<div>
@@ -614,11 +739,11 @@
 													{/if}
 												</div>
 												<div class="text-right">
-													<div class="font-semibold text-gray-900">
-														{formatCurrency(transaction.amount)}
+													<div class="font-semibold {getCreditDebitColor(transaction.credit)}">
+														{getCreditDebitPrefix(transaction.credit)}{formatCurrency(transaction.amount)}
 													</div>
-													<div class="text-xs text-gray-500">
-														{transaction.credit ? 'Credit' : 'Debit'}
+													<div class="text-xs font-medium {getCreditDebitColor(transaction.credit)}">
+														{transaction.credit ? 'Received' : 'Paid'}
 													</div>
 												</div>
 											</div>

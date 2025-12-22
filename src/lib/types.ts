@@ -49,4 +49,14 @@ export interface IssuerGroup {
 	issuer: string;
 	transactions: ParsedTransaction[];
 	totalAmount: number;
+	transactionType?: string; // Type of transactions in this group (e.g., 'BANCONTACT', 'INSTANTOVERSCHRIJVING')
+}
+
+export interface ParsedDescription {
+	date?: string;
+	time?: string;
+	name?: string;
+	location?: string;
+	cardholderName?: string;
+	type?: string; // Transaction type (e.g., 'BANCONTACT', 'MAESTRO', 'INSTANTOVERSCHRIJVING')
 }
