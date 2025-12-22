@@ -28,7 +28,7 @@
 	let accountSearchQuery: string = '';
 	let filteredAccounts: BeancountAccount[] = [];
 	let searchInput: HTMLInputElement;
-	
+
 	// Undo functionality
 	interface UndoAction {
 		type: 'map';
@@ -36,7 +36,7 @@
 		account: string;
 		timestamp: number;
 	}
-	
+
 	let undoHistory: UndoAction[] = [];
 	let maxUndoHistory = 50;
 
@@ -46,8 +46,10 @@
 		if (e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
 			if (!selectedIssuer) return;
 			e.preventDefault();
-			const currentIndex = issuerGroups.findIndex(group => group.issuer === selectedIssuer?.issuer);
-			
+			const currentIndex = issuerGroups.findIndex(
+				(group) => group.issuer === selectedIssuer?.issuer
+			);
+
 			if (e.key === 'ArrowUp' && currentIndex > 0) {
 				// Go to previous issuer group
 				selectIssuerGroup(issuerGroups[currentIndex - 1]);
@@ -81,10 +83,15 @@
 		}
 
 		// Handle arrow key navigation within account list
-		if (accountListRef?.contains(document.activeElement) && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
-			const allRadioButtons = Array.from(accountListRef.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
+		if (
+			accountListRef?.contains(document.activeElement) &&
+			(e.key === 'ArrowUp' || e.key === 'ArrowDown')
+		) {
+			const allRadioButtons = Array.from(
+				accountListRef.querySelectorAll('input[type="radio"]')
+			) as HTMLInputElement[];
 			const currentIndex = allRadioButtons.indexOf(e.target as HTMLInputElement);
-			
+
 			if (e.key === 'ArrowUp') {
 				e.preventDefault();
 				if (currentIndex === 0) {
@@ -117,7 +124,13 @@
 		}
 
 		// Handle ArrowDown from search input when no account selected
-		if (e.key === 'ArrowDown' && document.activeElement === searchInput && filteredAccounts.length === 1 && !selectedAccount && selectedIssuer) {
+		if (
+			e.key === 'ArrowDown' &&
+			document.activeElement === searchInput &&
+			filteredAccounts.length === 1 &&
+			!selectedAccount &&
+			selectedIssuer
+		) {
 			e.preventDefault();
 			selectedAccount = filteredAccounts[0].name;
 			// Focus the first account for visual feedback
@@ -131,7 +144,7 @@
 	onMount(async () => {
 		// Add global key event listener
 		document.addEventListener('keydown', handleGlobalKeydown);
-		
+
 		// Load data from session storage
 		const storedTransactions = sessionStorage.getItem('transactions');
 		const storedAccounts = sessionStorage.getItem('accounts');
@@ -144,32 +157,38 @@
 		// Parse and set data - session storage contains JSON data, not raw file content
 		const parsedTransactions = JSON.parse(storedTransactions);
 		const parsedAccounts = JSON.parse(storedAccounts);
-		
+
 		// Debug the raw session storage data
 		console.log('Raw stored transactions type:', typeof storedTransactions);
 		console.log('Raw stored accounts type:', typeof storedAccounts);
 		console.log('Parsed transactions type:', typeof parsedTransactions);
 		console.log('Parsed accounts type:', typeof parsedAccounts);
-		
+
 		// Debug logging
 		console.log('Parsed transactions count:', parsedTransactions.length);
 		console.log('Parsed accounts count:', parsedAccounts.length);
-		
+
 		transactions = parsedTransactions;
 		accounts = parsedAccounts;
 		remainingTransactions = [...parsedTransactions];
-		
+
 		// Force reactive update by explicitly setting filteredAccounts
 		filteredAccounts = parsedAccounts;
-		
+
 		updateIssuerGroups();
-		
-		console.log('Data assignment complete - transactions:', transactions.length, 'accounts:', accounts.length);
+
+		console.log(
+			'Data assignment complete - transactions:',
+			transactions.length,
+			'accounts:',
+			accounts.length
+		);
 	});
 
 	onDestroy(() => {
 		// Clean up global key event listener
-		document.removeEventListener('keydown', handleGlobalKeydown);
+		if (typeof document !== 'undefined')
+			document.removeEventListener('keydown', handleGlobalKeydown);
 	});
 
 	function updateIssuerGroups() {
@@ -182,16 +201,18 @@
 		accountSearchQuery = ''; // Clear search query when changing issuer
 		// Preselect all transactions for this issuer
 		const newChecked = new Set<string>();
-		group.transactions.forEach(t => newChecked.add(t.id));
+		group.transactions.forEach((t) => newChecked.add(t.id));
 		checkedTransactions = newChecked;
-		
+
 		// Scroll the selected issuer into view
 		setTimeout(() => {
-			const selectedButton = issuerGroupsRef?.querySelector(`button[data-issuer="${group.issuer}"]`) as HTMLButtonElement;
+			const selectedButton = issuerGroupsRef?.querySelector(
+				`button[data-issuer="${group.issuer}"]`
+			) as HTMLButtonElement;
 			if (selectedButton) {
 				selectedButton.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 			}
-			
+
 			// Focus the search input after selecting issuer
 			if (searchInput) {
 				searchInput.focus();
@@ -220,11 +241,11 @@
 		// Record undo action before mapping
 		const undoAction: UndoAction = {
 			type: 'map',
-			transactionIds: transactionsToMap.map(t => t.id),
+			transactionIds: transactionsToMap.map((t) => t.id),
 			account: selectedAccount,
 			timestamp: Date.now()
 		};
-		
+
 		// Add to undo history
 		undoHistory = [...undoHistory, undoAction].slice(-maxUndoHistory);
 
@@ -242,22 +263,22 @@
 		checkedTransactions = new Set();
 
 		// Get the current issuer index BEFORE updating issuer groups
-		const currentIndex = issuerGroups.findIndex(group => group.issuer === selectedIssuer?.issuer);
+		const currentIndex = issuerGroups.findIndex((group) => group.issuer === selectedIssuer?.issuer);
 		console.log('- currentIndex before update:', currentIndex);
-		
+
 		// Update issuer groups
 		updateIssuerGroups();
-		
+
 		// Debug logging after update
 		console.log('- issuerGroups after update:', issuerGroups.length);
 		console.log('- remainingTransactions:', remainingTransactions.length);
 		console.log('- mapping.size after mapping:', mapping.size);
-		
+
 		// Auto-advance to next issuer if available
 		if (issuerGroups.length > 0) {
 			// Clear search query before advancing
 			accountSearchQuery = '';
-			
+
 			// Calculate next index based on original position
 			let nextIndex;
 			if (currentIndex >= 0) {
@@ -267,13 +288,13 @@
 				// Fallback to first if something went wrong
 				nextIndex = 0;
 			}
-			
+
 			console.log('- nextIndex:', nextIndex);
 			console.log('- next issuer:', issuerGroups[nextIndex]?.issuer);
-			
+
 			// Select the next issuer group (or wrap to first if at end)
 			selectIssuerGroup(issuerGroups[nextIndex]);
-			
+
 			// Focus the search input after a short delay to ensure DOM is updated
 			setTimeout(() => {
 				if (searchInput) {
@@ -291,32 +312,32 @@
 
 	function undoLastAction() {
 		if (undoHistory.length === 0) return;
-		
+
 		const lastAction = undoHistory[undoHistory.length - 1];
-		
+
 		if (lastAction.type === 'map') {
 			// Unmap the transactions
 			for (const transactionId of lastAction.transactionIds) {
 				mapping.delete(transactionId);
 			}
-			
+
 			// Find the transactions and add them back to remaining
-			const unmappedTransactions = transactions.filter(t => 
+			const unmappedTransactions = transactions.filter((t) =>
 				lastAction.transactionIds.includes(t.id)
 			);
-			
+
 			remainingTransactions = [...remainingTransactions, ...unmappedTransactions];
-			
+
 			// Update issuer groups
 			updateIssuerGroups();
-			
+
 			// Remove from undo history
 			undoHistory = undoHistory.slice(0, -1);
-			
+
 			// Select the issuer group that contains the unmapped transactions
 			if (unmappedTransactions.length > 0) {
-				const issuerGroup = issuerGroups.find(group => 
-					group.transactions.some(t => unmappedTransactions.some(ut => ut.id === t.id))
+				const issuerGroup = issuerGroups.find((group) =>
+					group.transactions.some((t) => unmappedTransactions.some((ut) => ut.id === t.id))
 				);
 				if (issuerGroup) {
 					selectIssuerGroup(issuerGroup);
@@ -347,31 +368,32 @@
 
 	// Reactive statement to filter accounts based on search query and auto-select when only one account
 	$: {
-		console.log('Reactive statement running - accounts.length:', accounts.length, 'searchQuery:', accountSearchQuery);
+		console.log(
+			'Reactive statement running - accounts.length:',
+			accounts.length,
+			'searchQuery:',
+			accountSearchQuery
+		);
 		if (accountSearchQuery.trim() === '') {
 			filteredAccounts = accounts;
 			selectedAccount = ''; // Clear selection when query is empty
 		} else {
 			const query = accountSearchQuery.trim();
-			
+
 			// Filter accounts that match the query
-			const matchingAccounts = accounts.filter(account => 
-				fuzzyMatch(query, account.name) ||
-				fuzzyMatch(query, account.type)
+			const matchingAccounts = accounts.filter(
+				(account) => fuzzyMatch(query, account.name) || fuzzyMatch(query, account.type)
 			);
-			
+
 			// Sort by fuzzy score (higher score = more relevant)
 			filteredAccounts = matchingAccounts
-				.map(account => ({
+				.map((account) => ({
 					account,
-					score: Math.max(
-						fuzzyScore(query, account.name),
-						fuzzyScore(query, account.type)
-					)
+					score: Math.max(fuzzyScore(query, account.name), fuzzyScore(query, account.type))
 				}))
 				.sort((a, b) => b.score - a.score)
-				.map(item => item.account);
-			
+				.map((item) => item.account);
+
 			// Auto-select first account when typing a query
 			if (filteredAccounts.length > 0 && selectedIssuer) {
 				selectedAccount = filteredAccounts[0].name;
@@ -379,7 +401,7 @@
 				selectedAccount = '';
 			}
 		}
-		
+
 		console.log('filteredAccounts.length after filtering:', filteredAccounts.length);
 	}
 
@@ -411,9 +433,9 @@
 
 	function getIssuerGroupAmountColor(group: IssuerGroup): string {
 		// Determine if this group is mostly credits or debits
-		const creditCount = group.transactions.filter(t => t.credit).length;
-		const debitCount = group.transactions.filter(t => !t.credit).length;
-		
+		const creditCount = group.transactions.filter((t) => t.credit).length;
+		const debitCount = group.transactions.filter((t) => !t.credit).length;
+
 		// If mostly credits (money received), use green; if mostly debits (money paid), use red
 		return creditCount > debitCount ? 'text-green-600' : 'text-red-600';
 	}
@@ -422,10 +444,10 @@
 		// Remove non-alphanumeric characters and convert to lowercase
 		const cleanQuery = query.toLowerCase().replace(/[^a-z0-9]/g, '');
 		const cleanText = text.toLowerCase().replace(/[^a-z0-9]/g, '');
-		
+
 		// If query is empty, return true
 		if (cleanQuery.length === 0) return true;
-		
+
 		// Check if all characters from query appear in order in text
 		let queryIndex = 0;
 		for (let i = 0; i < cleanText.length && queryIndex < cleanQuery.length; i++) {
@@ -433,7 +455,7 @@
 				queryIndex++;
 			}
 		}
-		
+
 		// Return true if all query characters were found in order
 		return queryIndex === cleanQuery.length;
 	}
@@ -442,35 +464,35 @@
 		// Remove non-alphanumeric characters and convert to lowercase
 		const cleanQuery = query.toLowerCase().replace(/[^a-z0-9]/g, '');
 		const cleanText = text.toLowerCase().replace(/[^a-z0-9]/g, '');
-		
+
 		// If query is empty, return 0 (no score)
 		if (cleanQuery.length === 0) return 0;
-		
+
 		// Calculate fuzzy score based on:
 		// 1. Exact match bonus
-		// 2. Starting match bonus  
+		// 2. Starting match bonus
 		// 3. Sequential character matches
 		// 4. Character proximity
-		
+
 		let score = 0;
 		let queryIndex = 0;
 		let lastMatchIndex = -1;
-		
+
 		// Exact match gets highest score
 		if (cleanText === cleanQuery) {
 			return 1000;
 		}
-		
+
 		// Starting match gets high bonus
 		if (cleanText.startsWith(cleanQuery)) {
 			score += 500;
 		}
-		
+
 		// Sequential character matching
 		for (let i = 0; i < cleanText.length && queryIndex < cleanQuery.length; i++) {
 			if (cleanText[i] === cleanQuery[queryIndex]) {
 				queryIndex++;
-				
+
 				// Bonus for consecutive matches
 				if (lastMatchIndex === i - 1) {
 					score += 10;
@@ -479,19 +501,19 @@
 					const gap = i - lastMatchIndex;
 					score += Math.max(1, 10 - gap);
 				}
-				
+
 				lastMatchIndex = i;
 			}
 		}
-		
+
 		// If all characters matched, add completion bonus
 		if (queryIndex === cleanQuery.length) {
 			score += 100;
-			
+
 			// Bonus for shorter text (higher relevance)
 			score += Math.max(0, 50 - cleanText.length);
 		}
-		
+
 		return score;
 	}
 </script>
@@ -544,7 +566,11 @@
 			<div class="lg:col-span-1">
 				<div class="rounded-lg bg-white p-6 shadow-md">
 					<h2 class="mb-4 text-lg font-semibold text-gray-900" id="issuer-groups">Issuer Groups</h2>
-					<div class="max-h-96 space-y-2 overflow-y-auto" aria-labelledby="issuer-groups" bind:this={issuerGroupsRef}>
+					<div
+						class="max-h-96 space-y-2 overflow-y-auto"
+						aria-labelledby="issuer-groups"
+						bind:this={issuerGroupsRef}
+					>
 						{#each issuerGroups as group}
 							<button
 								data-issuer={group.issuer}
@@ -557,13 +583,20 @@
 								<div class="flex items-center justify-between">
 									<div class="font-medium text-gray-900">{group.issuer}</div>
 									{#if group.transactionType}
-										<span class="rounded-full px-2 py-1 text-xs font-medium {getTransactionTypeBadgeColor(group.transactionType)}">
+										<span
+											class="rounded-full px-2 py-1 text-xs font-medium {getTransactionTypeBadgeColor(
+												group.transactionType
+											)}"
+										>
 											{group.transactionType}
 										</span>
 									{/if}
 								</div>
 								<div class="text-sm text-gray-600">
-									{group.transactions.length} transactions • <span class="{getIssuerGroupAmountColor(group)}">{formatCurrency(group.totalAmount)}</span>
+									{group.transactions.length} transactions •
+									<span class={getIssuerGroupAmountColor(group)}
+										>{formatCurrency(group.totalAmount)}</span
+									>
 								</div>
 							</button>
 						{/each}
@@ -578,9 +611,7 @@
 			<div class="lg:col-span-1">
 				{#if selectedIssuer}
 					<div class="rounded-lg bg-white p-6 shadow-md">
-						<h2 class="mb-4 text-lg font-semibold text-gray-900">
-							Select Account
-						</h2>
+						<h2 class="mb-4 text-lg font-semibold text-gray-900">Select Account</h2>
 						<fieldset>
 							<legend class="mb-2 block text-sm font-medium text-gray-700">
 								Search Accounts
@@ -592,11 +623,14 @@
 									placeholder="Search accounts..."
 									bind:value={accountSearchQuery}
 									bind:this={searchInput}
-									class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500"
+									class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-blue-500"
 								/>
 							</div>
 							<!-- Account List -->
-							<div class="max-h-96 overflow-y-auto rounded-md border border-gray-300 bg-white" bind:this={accountListRef}>
+							<div
+								class="max-h-96 overflow-y-auto rounded-md border border-gray-300 bg-white"
+								bind:this={accountListRef}
+							>
 								{#each filteredAccounts as account}
 									<label
 										class="flex cursor-pointer items-center border-b border-gray-100 px-3 py-2 last:border-b-0 hover:bg-gray-50"
@@ -740,9 +774,13 @@
 												</div>
 												<div class="text-right">
 													<div class="font-semibold {getCreditDebitColor(transaction.credit)}">
-														{getCreditDebitPrefix(transaction.credit)}{formatCurrency(transaction.amount)}
+														{getCreditDebitPrefix(transaction.credit)}{formatCurrency(
+															transaction.amount
+														)}
 													</div>
-													<div class="text-xs font-medium {getCreditDebitColor(transaction.credit)}">
+													<div
+														class="text-xs font-medium {getCreditDebitColor(transaction.credit)}"
+													>
 														{transaction.credit ? 'Received' : 'Paid'}
 													</div>
 												</div>
@@ -754,10 +792,8 @@
 						</div>
 					</div>
 				{:else}
-					<div class="rounded-lg bg-white p-6 shadow-md h-full flex items-center justify-center">
-						<p class="text-gray-500 text-center">
-							Select an issuer group to see transactions
-						</p>
+					<div class="flex h-full items-center justify-center rounded-lg bg-white p-6 shadow-md">
+						<p class="text-center text-gray-500">Select an issuer group to see transactions</p>
 					</div>
 				{/if}
 			</div>

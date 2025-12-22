@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { parseCSV, parseBeancountFile } from '$lib/utils';
-	import type { ParsedTransaction, BeancountAccount } from '$lib/types';
+	import { resolve } from '$app/paths';
 
 	let csvFile: File | null = null;
 	let beancountFile: File | null = null;
@@ -31,12 +31,12 @@
 			console.log('Parsed accounts:', accounts);
 
 			// Store data in session storage for the import page
-			sessionStorage.setItem('transactions', JSON.stringify(transactions.slice(0, 10)));
+			sessionStorage.setItem('transactions', JSON.stringify(transactions));
 			sessionStorage.setItem('accounts', JSON.stringify(accounts));
 			console.log('Data stored in session storage');
 
 			// Navigate to import page
-			goto('/import');
+			goto(resolve('/import'));
 		} catch (err) {
 			console.error('Error during import:', err);
 			error = err instanceof Error ? err.message : 'Failed to parse files';
