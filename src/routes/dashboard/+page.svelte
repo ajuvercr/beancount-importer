@@ -60,6 +60,21 @@
 	let presets: DashboardPreset[] = [];
 	let presetName = '';
 
+	// Compare / diff against an earlier (or later) period of the SAME width.
+	// Define a baseline by its start date only; the end is derived to match the
+	// current range width. Shift it with the steppers to line periods up.
+	let compareEnabled = false;
+	let compareStart = '';
+	$: rangeDays =
+		startDate && endDate
+			? Math.round((parseLocal(endDate).getTime() - parseLocal(startDate).getTime()) / 86400000)
+			: 0;
+	$: compareEnd = compareStart ? fmtDate(addDays(parseLocal(compareStart), rangeDays)) : '';
+	$: compareRange =
+		compareEnabled && compareStart && compareEnd
+			? { startDate: compareStart, endDate: compareEnd }
+			: null;
+
 	const palette = [
 		'#2563eb', '#16a34a', '#dc2626', '#d97706', '#7c3aed',
 		'#0891b2', '#db2777', '#65a30d', '#ca8a04', '#4f46e5'
@@ -74,6 +89,29 @@
 
 	function deriveRoots(list: string[]): string[] {
 		return [...new Set(list.map((a) => a.split(':')[0]))].sort();
+	}
+
+	// Carry-forward sampler: value of the last point at or before time t (0 before).
+	function makeSampler(points: { ms: number; value: number }[]): (t: number) => number {
+		return (t: number) => {
+			let v = 0;
+			for (const p of points) {
+				if (p.ms <= t) v = p.value;
+				else break;
+			}
+			return v;
+		};
+	}
+
+	// Parse an ISO date as local midnight (avoids UTC/local drift in comparisons).
+	function parseLocal(date: string): Date {
+		const [y, m, d] = date.split('-').map(Number);
+		return new Date(y, m - 1, d);
+	}
+
+	// Add a number of days using local calendar arithmetic (DST-safe).
+	function addDays(d: Date, days: number): Date {
+		return new Date(d.getFullYear(), d.getMonth(), d.getDate() + days);
 	}
 
 	onMount(async () => {
@@ -156,31 +194,93 @@
 		}
 
 		const datasets: any[] = [];
-		if (showBalance) {
+		const rateLabel = showDailyRate ? 'Daily rate' : `Per ${windowSize} days`;
+		let titleText = `${selectedAccount}${includeDescendants ? ' (incl. sub-accounts)' : ''}`;
+		let yTitle = showBalance ? 'Balance (EUR)' : 'Amount (EUR)';
+		let y1Title = 'Flow rate (EUR)';
+
+		if (compareRange) {
+			// Diff mode: plot (current − baseline) so an identical period is flat at 0.
+			const cmp = await beancountDB.getRunningAverage(
+				selectedAccount, includeDescendants, windowSize,
+				compareRange.startDate, compareRange.endDate, showDailyRate, useEMA
+			);
+			// Align the baseline onto the current timeframe by whole calendar months
+			// (so Jan→Jan year-over-year, robust to leap years / month lengths).
+			const cs = parseLocal(startDate || runningAverageData[0].date);
+			const bs = parseLocal(compareRange.startDate || cmp[0]?.date || startDate);
+			const monthsShift = (cs.getFullYear() - bs.getFullYear()) * 12 + (cs.getMonth() - bs.getMonth());
+			const shiftMs = (date: string) => {
+				const d = parseLocal(date);
+				return new Date(d.getFullYear(), d.getMonth() + monthsShift, d.getDate()).getTime();
+			};
+
+			const curBal = makeSampler(runningAverageData.map((d) => ({ ms: parseLocal(d.date).getTime(), value: d.balance })));
+			const curRate = makeSampler(runningAverageData.map((d) => ({ ms: parseLocal(d.date).getTime(), value: d.runningAverage })));
+			const baseBal = makeSampler(cmp.map((d) => ({ ms: shiftMs(d.date), value: d.balance })));
+			const baseRate = makeSampler(cmp.map((d) => ({ ms: shiftMs(d.date), value: d.runningAverage })));
+
+			// Union of sample points: current dates + baseline dates shifted onto the
+			// current timeframe. Both samplers now live in the same calendar space.
+			const xsMs = new Set<number>();
+			for (const d of runningAverageData) xsMs.add(parseLocal(d.date).getTime());
+			for (const d of cmp) xsMs.add(shiftMs(d.date));
+			const xs = [...xsMs].sort((a, b) => a - b);
+
+			if (showBalance) {
+				datasets.push({
+					label: 'Δ Balance',
+					data: xs.map((x) => ({ x, y: curBal(x) - baseBal(x) })),
+					borderColor: '#2563eb',
+					backgroundColor: 'rgba(37, 99, 235, 0.12)',
+					borderWidth: 2,
+					pointRadius: 0,
+					stepped: true,
+					fill: true,
+					yAxisID: 'y'
+				});
+			}
 			datasets.push({
-				label: 'Balance',
-				data: runningAverageData.map((d) => ({ x: d.date, y: d.balance })),
-				borderColor: '#2563eb',
-				backgroundColor: 'rgba(37, 99, 235, 0.12)',
+				label: `Δ ${rateLabel}`,
+				data: xs.map((x) => ({ x, y: curRate(x) - baseRate(x) })),
+				borderColor: '#dc2626',
+				backgroundColor: 'rgba(220, 38, 38, 0.12)',
 				borderWidth: 2,
 				pointRadius: 0,
-				stepped: true,
-				fill: true,
-				yAxisID: 'y'
+				tension: 0.25,
+				fill: false,
+				yAxisID: showBalance ? 'y1' : 'y'
+			});
+
+			titleText = `${selectedAccount} — change vs ${compareRange.startDate} → ${compareRange.endDate}`;
+			yTitle = 'Δ Balance (EUR)';
+			y1Title = 'Δ Flow rate (EUR)';
+		} else {
+			if (showBalance) {
+				datasets.push({
+					label: 'Balance',
+					data: runningAverageData.map((d) => ({ x: d.date, y: d.balance })),
+					borderColor: '#2563eb',
+					backgroundColor: 'rgba(37, 99, 235, 0.12)',
+					borderWidth: 2,
+					pointRadius: 0,
+					stepped: true,
+					fill: true,
+					yAxisID: 'y'
+				});
+			}
+			datasets.push({
+				label: `${rateLabel} (${useEMA ? 'EMA' : 'SMA'} ${windowSize}d)`,
+				data: runningAverageData.map((d) => ({ x: d.date, y: d.runningAverage })),
+				borderColor: '#dc2626',
+				backgroundColor: 'rgba(220, 38, 38, 0.12)',
+				borderWidth: 2,
+				pointRadius: 0,
+				tension: 0.25,
+				fill: false,
+				yAxisID: showBalance ? 'y1' : 'y'
 			});
 		}
-		const rateLabel = showDailyRate ? 'Daily rate' : `Per ${windowSize} days`;
-		datasets.push({
-			label: `${rateLabel} (${useEMA ? 'EMA' : 'SMA'} ${windowSize}d)`,
-			data: runningAverageData.map((d) => ({ x: d.date, y: d.runningAverage })),
-			borderColor: '#dc2626',
-			backgroundColor: 'rgba(220, 38, 38, 0.12)',
-			borderWidth: 2,
-			pointRadius: 0,
-			tension: 0.25,
-			fill: false,
-			yAxisID: showBalance ? 'y1' : 'y'
-		});
 
 		chart = new Chart(ctx, {
 			type: 'line',
@@ -199,14 +299,18 @@
 					},
 					y: {
 						position: 'left',
-						title: { display: true, text: showBalance ? 'Balance (EUR)' : 'Amount (EUR)' },
-						grid: { color: 'rgba(0,0,0,0.05)' }
+						title: { display: true, text: yTitle },
+						grid: {
+							color: (c: any) =>
+								compareRange && c.tick?.value === 0 ? 'rgba(0,0,0,0.35)' : 'rgba(0,0,0,0.05)',
+							lineWidth: (c: any) => (compareRange && c.tick?.value === 0 ? 1.5 : 1)
+						}
 					},
 					...(showBalance
 						? {
 								y1: {
 									position: 'right',
-									title: { display: true, text: 'Flow rate (EUR)' },
+									title: { display: true, text: y1Title },
 									grid: { drawOnChartArea: false }
 								}
 							}
@@ -215,7 +319,7 @@
 				plugins: {
 					title: {
 						display: true,
-						text: `${selectedAccount}${includeDescendants ? ' (incl. descendants)' : ''}`
+						text: titleText
 					},
 					legend: { position: 'top' },
 					tooltip: { callbacks: { label: (c: any) => `${c.dataset.label}: €${Number(c.parsed.y).toFixed(2)}` } }
@@ -252,6 +356,90 @@
 			labels[n.id] = n.label;
 			colors[n.id] = nodeColor(n.id);
 			columns[n.id] = n.column;
+		}
+
+		// Diff mode: width = magnitude of change vs the baseline period, colored by
+		// direction. Uses the CURRENT root/depth over the baseline date range.
+		if (compareRange) {
+			const base = await beancountDB.getCashFlow({
+				root: flowRoot,
+				maxDepth: flowMaxDepth,
+				minAmount: 0,
+				startDate: compareRange.startDate,
+				endDate: compareRange.endDate
+			});
+			const key = (l: CashFlowLink) => `${l.from}\u0000${l.to}`;
+			const baseMap = new Map(base.links.map((l) => [key(l), l.flow]));
+			const curMap = new Map(result.links.map((l) => [key(l), l.flow]));
+			for (const n of base.nodes) {
+				if (!(n.id in columns)) {
+					labels[n.id] = n.label;
+					colors[n.id] = nodeColor(n.id);
+					columns[n.id] = n.column;
+				}
+			}
+
+			const diffData: { from: string; to: string; flow: number; cur: number; base: number; delta: number }[] = [];
+			for (const k of new Set([...curMap.keys(), ...baseMap.keys()])) {
+				const cur = curMap.get(k) ?? 0;
+				const baseVal = baseMap.get(k) ?? 0;
+				const delta = Math.round((cur - baseVal) * 100) / 100;
+				if (Math.abs(delta) < Math.max(flowMinAmount, 0.01)) continue;
+				const [from, to] = k.split('\u0000');
+				diffData.push({ from, to, flow: Math.abs(delta), cur, base: baseVal, delta });
+			}
+			diffData.sort((a, b) => b.flow - a.flow);
+
+			if (diffData.length === 0) {
+				chart = null;
+				error = `No differences vs ${compareRange.startDate} → ${compareRange.endDate} for ${flowRoot} in this range.`;
+				return;
+			}
+
+			const up = '#dc2626';
+			const down = '#16a34a';
+			const edgeColor = (c: any) => (c.dataset.data[c.dataIndex].delta >= 0 ? up : down);
+
+			chart = new Chart(ctx, {
+				type: 'sankey' as any,
+				data: {
+					datasets: [
+						{
+							label: 'Change vs baseline',
+							data: diffData,
+							colorFrom: edgeColor,
+							colorTo: edgeColor,
+							colorMode: 'gradient',
+							labels,
+							column: columns,
+							size: 'max'
+						} as any
+					]
+				},
+				options: {
+					responsive: true,
+					maintainAspectRatio: false,
+					animation: false,
+					layout: { padding: { right: 12, left: 4, top: 8, bottom: 8 } },
+					plugins: {
+						title: { display: true, text: `${flowRoot} — change vs ${compareRange.startDate} → ${compareRange.endDate}` },
+						tooltip: {
+							callbacks: {
+								label: (c: any) => {
+									const d = c.dataset.data[c.dataIndex];
+									const sign = d.delta >= 0 ? '+' : '−';
+									return [
+										`${d.from} → ${d.to}`,
+										`Now €${d.cur.toFixed(2)} · Was €${d.base.toFixed(2)}`,
+										`Change ${sign}€${Math.abs(d.delta).toFixed(2)}`
+									];
+								}
+							}
+						}
+					}
+				} as any
+			});
+			return;
 		}
 
 		chart = new Chart(ctx, {
@@ -299,7 +487,10 @@
 	}
 
 	function fmtDate(d: Date): string {
-		return d.toISOString().split('T')[0];
+		const y = d.getFullYear();
+		const m = String(d.getMonth() + 1).padStart(2, '0');
+		const day = String(d.getDate()).padStart(2, '0');
+		return `${y}-${m}-${day}`;
 	}
 
 	let activeRange = 'all';
@@ -362,14 +553,8 @@
 
 	function applyQuickRange(range: QuickRange) {
 		const { start, end } = range.compute();
-		// Clamp to the data's available range so empty selections are avoided.
-		if (dataRange) {
-			startDate = start < dataRange.start ? dataRange.start : start;
-			endDate = end > dataRange.end ? dataRange.end : end;
-		} else {
-			startDate = start;
-			endDate = end;
-		}
+		startDate = start;
+		endDate = end;
 		activeRange = range.id;
 		refresh();
 	}
@@ -398,6 +583,22 @@
 		startDate = fmtDate(s);
 		endDate = fmtDate(e);
 		activeRange = 'custom';
+		refresh();
+	}
+
+	function toggleCompare() {
+		// On enable, seed the baseline with the current start so the diff is flat
+		// (comparing the period against itself) until the user shifts it.
+		if (compareEnabled) compareStart = startDate;
+		refresh();
+	}
+
+	function shiftCompare(unit: 'month' | 'year', dir: 1 | -1) {
+		if (!compareStart) return;
+		const s = parseLocal(compareStart);
+		if (unit === 'month') s.setMonth(s.getMonth() + dir);
+		else s.setFullYear(s.getFullYear() + dir);
+		compareStart = fmtDate(s);
 		refresh();
 	}
 
@@ -611,6 +812,67 @@
 						</button>
 					</div>
 
+					<!-- Compare with an earlier/later period of the same width -->
+					<div class="mb-5 rounded-md bg-gray-50 px-3 py-2">
+						<label class="flex items-center gap-2 text-sm font-medium text-gray-700">
+							<input
+								type="checkbox"
+								bind:checked={compareEnabled}
+								on:change={toggleCompare}
+								class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+							/>
+							Compare with another period (show difference)
+						</label>
+
+						<div
+							class="mt-3 flex flex-wrap items-end gap-4 {compareEnabled
+								? ''
+								: 'pointer-events-none opacity-40'}"
+						>
+							<div>
+								<label for="compare-start" class="mb-1 block text-sm font-medium text-gray-700">Baseline start</label>
+								<input
+									id="compare-start"
+									type="date"
+									bind:value={compareStart}
+									on:change={refresh}
+									disabled={!compareEnabled}
+									class="block rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+								/>
+							</div>
+							<div>
+								<label for="compare-end" class="mb-1 block text-sm font-medium text-gray-700">Baseline end</label>
+								<input
+									id="compare-end"
+									type="date"
+									value={compareEnd}
+									readonly
+									tabindex="-1"
+									class="block cursor-not-allowed rounded-md border-gray-200 bg-gray-100 text-gray-500 shadow-sm"
+								/>
+							</div>
+							<div>
+								<span class="mb-1 block text-sm font-medium text-gray-700">Shift baseline</span>
+								<div class="inline-flex overflow-hidden rounded-md border border-gray-300">
+									<button on:click={() => shiftCompare('year', -1)} disabled={!compareEnabled} title="Back one year" class="border-r border-gray-300 bg-white px-2.5 py-2 text-sm text-gray-600 hover:bg-gray-50">−1y</button>
+									<button on:click={() => shiftCompare('month', -1)} disabled={!compareEnabled} title="Back one month" class="border-r border-gray-300 bg-white px-2.5 py-2 text-sm text-gray-600 hover:bg-gray-50">−1m</button>
+									<button on:click={() => shiftCompare('month', 1)} disabled={!compareEnabled} title="Forward one month" class="border-r border-gray-300 bg-white px-2.5 py-2 text-sm text-gray-600 hover:bg-gray-50">+1m</button>
+									<button on:click={() => shiftCompare('year', 1)} disabled={!compareEnabled} title="Forward one year" class="bg-white px-2.5 py-2 text-sm text-gray-600 hover:bg-gray-50">+1y</button>
+								</div>
+							</div>
+						</div>
+
+						{#if compareRange && view === 'cashflow'}
+							<div class="mt-2 flex items-center gap-3 text-xs text-gray-500">
+								<span class="flex items-center gap-1"><span class="inline-block h-2 w-3 rounded-sm bg-red-600"></span>more</span>
+								<span class="flex items-center gap-1"><span class="inline-block h-2 w-3 rounded-sm bg-green-600"></span>less</span>
+								<span>vs {compareRange.startDate} → {compareRange.endDate}</span>
+							</div>
+						{:else if compareRange}
+							<p class="mt-2 text-xs text-gray-500">Showing change vs {compareRange.startDate} → {compareRange.endDate} (flat = identical). Baseline end follows the current range width.</p>
+						{/if}
+					</div>
+
 					<!-- Controls -->
 					{#if view === 'trends'}
 						<div class="mb-5 flex flex-wrap items-end gap-4">
@@ -629,7 +891,9 @@
 							</div>
 							<label class="flex items-center gap-2 pb-2 text-sm text-gray-700">
 								<input type="checkbox" bind:checked={includeDescendants} on:change={refresh} class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
-								Include descendants
+								<span title="When on, totals roll up all sub-accounts (e.g. Uitgaven:Eten includes Uitgaven:Eten:Frietjes).">
+									Include sub-accounts (roll up totals)
+								</span>
 							</label>
 							<div>
 								<label for="window-size" class="mb-1 block text-sm font-medium text-gray-700">Window (days)</label>

@@ -265,8 +265,8 @@ export async function createBeancountDB(): Promise<BeancountDB> {
 			const params = [account];
 
 			if (includeDescendants) {
-				accountFilter = `account LIKE ?`;
-				params[0] = `${account}%`;
+				accountFilter = `(account = ? OR account LIKE ?)`;
+				params.push(`${account}:%`);
 			}
 
 			const result = db.exec(`SELECT COALESCE(SUM(amount), 0) as balance FROM postings WHERE ${accountFilter}`);
@@ -275,12 +275,15 @@ export async function createBeancountDB(): Promise<BeancountDB> {
 
 		getAccountBalanceHistory: async (account: string, includeDescendants: boolean) => {
 			let accountFilter = `p.account = ?`;
-			const params = [account];
+			let filterParams = [account];
 
 			if (includeDescendants) {
-				accountFilter = `p.account LIKE ?`;
-				params[0] = `${account}%`;
+				accountFilter = `(p.account = ? OR p.account LIKE ?)`;
+				filterParams = [account, `${account}:%`];
 			}
+
+			// The filter appears twice (subquery + outer WHERE), so bind its params twice.
+			const params = [...filterParams, ...filterParams];
 
 			const result = db.exec(`
 				SELECT 
@@ -290,7 +293,7 @@ export async function createBeancountDB(): Promise<BeancountDB> {
 						SELECT COALESCE(SUM(p2.amount), 0)
 						FROM postings p2
 						JOIN transactions t2 ON p2.transaction_id = t2.id
-						WHERE t2.date <= t.date AND (${accountFilter.replace('p.account', 'p2.account')})
+						WHERE t2.date <= t.date AND (${accountFilter.replaceAll('p.account', 'p2.account')})
 					) as cumulative_balance
 				FROM transactions t
 				JOIN postings p ON t.id = p.transaction_id
@@ -318,8 +321,8 @@ export async function createBeancountDB(): Promise<BeancountDB> {
 			const params = [account];
 
 			if (includeDescendants) {
-				accountFilter = `p.account LIKE ?`;
-				params[0] = `${account}%`;
+				accountFilter = `(p.account = ? OR p.account LIKE ?)`;
+				params.push(`${account}:%`);
 			}
 
 
