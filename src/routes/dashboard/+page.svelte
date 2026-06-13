@@ -22,6 +22,8 @@
 
 	let beancountDB: BeancountDB | null = null;
 	let accounts: string[] = [];
+	let postingAccounts: string[] = [];
+	$: postingSet = new Set(postingAccounts);
 	let isLoading = true;
 	let error: string | null = null;
 	let chart: Chart | null = null;
@@ -91,6 +93,21 @@
 		return [...new Set(list.map((a) => a.split(':')[0]))].sort();
 	}
 
+	// Expand a list of posting accounts into the full tree, adding every ancestor
+	// prefix (e.g. Uitgaven:Eten:Frietjes also yields Uitgaven and Uitgaven:Eten)
+	// so parent/group accounts are selectable even without direct postings.
+	function expandWithParents(list: string[]): string[] {
+		const set = new Set<string>();
+		for (const acc of list) {
+			const segs = acc.split(':');
+			for (let i = 1; i <= segs.length; i++) set.add(segs.slice(0, i).join(':'));
+		}
+		return [...set].sort();
+	}
+
+	// A "group" account has no postings of its own — only sub-accounts.
+	const isGroupAccount = (account: string) => !postingSet.has(account);
+
 	// Carry-forward sampler: value of the last point at or before time t (0 before).
 	function makeSampler(points: { ms: number; value: number }[]): (t: number) => number {
 		return (t: number) => {
@@ -135,7 +152,8 @@
 			dataFiles = beancountData;
 			beancountDB = await createBeancountDB();
 			await beancountDB.loadBeancountData(beancountData);
-			accounts = await beancountDB.getAllAccounts();
+			postingAccounts = await beancountDB.getAllAccounts();
+			accounts = expandWithParents(postingAccounts);
 			dataRange = await beancountDB.getDateRange();
 
 			if (accounts.length === 0) {
@@ -586,6 +604,13 @@
 		refresh();
 	}
 
+	function onAccountChange() {
+		// Group accounts have no postings of their own, so rolling up sub-accounts
+		// is the only way to see a total — enable it automatically.
+		if (isGroupAccount(selectedAccount)) includeDescendants = true;
+		refresh();
+	}
+
 	function toggleCompare() {
 		// On enable, seed the baseline with the current start so the diff is flat
 		// (comparing the period against itself) until the user shifts it.
@@ -704,7 +729,8 @@
 			saveLoadedData(next);
 			sessionStorage.setItem('beancountData', JSON.stringify(next));
 			await beancountDB.loadBeancountData(next);
-			accounts = await beancountDB.getAllAccounts();
+			postingAccounts = await beancountDB.getAllAccounts();
+			accounts = expandWithParents(postingAccounts);
 			dataRange = await beancountDB.getDateRange();
 			if (!accounts.includes(selectedAccount) && accounts.length > 0) selectedAccount = accounts[0];
 			await refresh();
@@ -881,11 +907,11 @@
 								<select
 									id="account-select"
 									bind:value={selectedAccount}
-									on:change={refresh}
+									on:change={onAccountChange}
 									class="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
 								>
 									{#each accounts as account}
-										<option value={account}>{account}</option>
+										<option value={account}>{account}{isGroupAccount(account) ? ' — group (rolls up)' : ''}</option>
 									{/each}
 								</select>
 							</div>
