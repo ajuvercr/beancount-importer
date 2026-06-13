@@ -14,8 +14,12 @@
 		"lint": "prettier --check . && eslint ."
 	},
 	"dependencies": {
+		"chart.js": "^4.5.1",
+		"chartjs-adapter-date-fns": "^3.0.0",
+		"chartjs-chart-sankey": "^0.14.3",
+		"date-fns": "^4.1.0",
 		"papaparse": "^5.4.1",
-		"date-fns": "^4.1.0"
+		"sql.js": "^1.13.0"
 	},
 	"devDependencies": {
 		"@eslint/compat": "^1.4.0",
@@ -26,6 +30,7 @@
 		"@tailwindcss/vite": "^4.1.17",
 		"@types/node": "^24",
 		"@types/papaparse": "^5.3.14",
+		"@types/sql.js": "^1.4.9",
 		"eslint": "^9.39.1",
 		"eslint-config-prettier": "^10.1.8",
 		"eslint-plugin-svelte": "^3.13.1",

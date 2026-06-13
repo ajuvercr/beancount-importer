@@ -1,12 +1,23 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { parseCSV, parseBeancountFile } from '$lib/utils';
 	import { resolve } from '$app/paths';
+	import { loadStoredData, loadPresets } from '$lib/presets';
 
 	let csvFile: File | null = null;
 	let beancountFile: File | null = null;
+	let beancountFiles: FileList | null = null;
 	let isLoading = false;
 	let error: string | null = null;
+	let hasStoredData = false;
+	let storedPresetCount = 0;
+
+	onMount(() => {
+		const stored = loadStoredData();
+		hasStoredData = !!stored;
+		storedPresetCount = loadPresets().length;
+	});
 
 	async function handleStartImport() {
 		if (!csvFile || !beancountFile) {
@@ -45,6 +56,41 @@
 		}
 	}
 
+	async function handleBeancountGraphs() {
+		if (!beancountFiles || beancountFiles.length === 0) {
+			error = 'Please select beancount files';
+			return;
+		}
+
+		isLoading = true;
+		error = null;
+
+		try {
+			// Parse all beancount files
+			const beancountData = [];
+			for (let i = 0; i < beancountFiles.length; i++) {
+				const file = beancountFiles[i];
+				const text = await file.text();
+				beancountData.push({
+					name: file.name,
+					content: text
+				});
+			}
+
+			// Store beancount data in session storage
+			sessionStorage.setItem('beancountData', JSON.stringify(beancountData));
+			console.log('Beancount data stored in session storage');
+
+			// Navigate to dashboard page
+			goto(resolve('/dashboard'));
+		} catch (err) {
+			console.error('Error during beancount processing:', err);
+			error = err instanceof Error ? err.message : 'Failed to parse beancount files';
+		} finally {
+			isLoading = false;
+		}
+	}
+
 	function handleCSVFileChange(event: Event) {
 		const target = event.target as HTMLInputElement;
 		const file = target.files?.[0];
@@ -66,6 +112,18 @@
 		} else {
 			beancountFile = null;
 			error = 'Please select a valid beancount file (.bean or .beancount)';
+		}
+	}
+
+	function handleBeancountFilesChange(event: Event) {
+		const target = event.target as HTMLInputElement;
+		const files = target.files;
+		if (files && files.length > 0) {
+			beancountFiles = files;
+			error = null;
+		} else {
+			beancountFiles = null;
+			error = 'Please select valid beancount files (.bean or .beancount)';
 		}
 	}
 </script>
@@ -111,6 +169,24 @@
 					{/if}
 				</div>
 
+				<!-- Beancount Files for Graphs -->
+				<div>
+					<label for="beancount-files" class="mb-2 block text-sm font-medium text-gray-700">
+						Beancount Files for Graphs (.bean or .beancount)
+					</label>
+					<input
+						type="file"
+						id="beancount-files"
+						accept=".bean,.beancount"
+						multiple
+						on:change={handleBeancountFilesChange}
+						class="block w-full text-sm text-gray-500 file:mr-4 file:rounded-md file:border-0 file:bg-green-50 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-green-700 hover:file:bg-green-100"
+					/>
+					{#if beancountFiles}
+						<p class="mt-2 text-sm text-green-600">Selected {beancountFiles.length} file(s)</p>
+					{/if}
+				</div>
+
 				<!-- Error Display -->
 				{#if error}
 					<div class="rounded-md border border-red-200 bg-red-50 p-4">
@@ -132,6 +208,35 @@
 						{/if}
 					</button>
 				</div>
+
+				<!-- Graphs Button -->
+				<div>
+					<button
+						on:click={handleBeancountGraphs}
+						disabled={!beancountFiles || beancountFiles.length === 0 || isLoading}
+						class="w-full rounded-md bg-green-600 px-4 py-3 font-semibold text-white transition-colors hover:bg-green-700 disabled:cursor-not-allowed disabled:bg-gray-400"
+					>
+						{#if isLoading}
+							Processing files...
+						{:else}
+							View Beancount Graphs
+						{/if}
+					</button>
+				</div>
+
+				{#if hasStoredData}
+					<div class="rounded-md border border-green-200 bg-green-50 p-4">
+						<p class="text-sm text-green-800">
+							Previously loaded beancount data found{storedPresetCount > 0 ? ` with ${storedPresetCount} saved view(s)` : ''}.
+						</p>
+						<button
+							on:click={() => goto(resolve('/dashboard'))}
+							class="mt-3 w-full rounded-md bg-white px-4 py-2 text-sm font-semibold text-green-700 ring-1 ring-green-300 transition-colors hover:bg-green-100"
+						>
+							Open saved dashboard
+						</button>
+					</div>
+				{/if}
 
 				<!-- Instructions -->
 				<div class="mt-8 rounded-md bg-blue-50 p-4">
