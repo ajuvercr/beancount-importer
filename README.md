@@ -30,6 +30,9 @@ Re-upload an updated Beancount file to refresh every chart with new data.
 - **Include sub-accounts** — roll up an account's whole subtree (e.g.
   `Uitgaven:Eten` includes `Uitgaven:Eten:Frietjes`). Matches true descendants
   only, never prefix-siblings like `Uitgaven:Etentje`.
+- **Drag to inspect** — drag across the chart to highlight a date range and list
+  every transaction inside it (sortable by biggest amount or by date) — handy for
+  finding out what caused a spike.
 
 ### Cash Flow (Hierarchy)
 

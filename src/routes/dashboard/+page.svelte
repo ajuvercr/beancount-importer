@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
-	import { createBeancountDB, type BeancountDB, type CashFlowLink } from '$lib/beancount-db';
+	import { createBeancountDB, type BeancountDB, type CashFlowLink, type TransactionRow } from '$lib/beancount-db';
 	import Chart from 'chart.js/auto';
 	import 'chartjs-adapter-date-fns';
 	import { SankeyController, Flow } from 'chartjs-chart-sankey';
@@ -40,6 +40,20 @@
 	let showDailyRate = true;
 	let useEMA = true;
 	let runningAverageData: { date: string; balance: number; runningAverage: number }[] = [];
+
+	// Drag-to-select range on the Trends chart → list transactions in that range.
+	let selPxStart: number | null = null;
+	let selPxEnd: number | null = null;
+	let selDragging = false;
+	let selRange: { start: string; end: string } | null = null;
+	let selectedTransactions: TransactionRow[] = [];
+	let txSort: 'amount' | 'date' = 'amount';
+	$: sortedTransactions = [...selectedTransactions].sort((a, b) =>
+		txSort === 'amount'
+			? Math.abs(b.amount) - Math.abs(a.amount)
+			: a.date.localeCompare(b.date) || Math.abs(b.amount) - Math.abs(a.amount)
+	);
+	$: selTotal = selectedTransactions.reduce((s, t) => s + t.amount, 0);
 
 	// Cash-flow controls (hierarchical breakdown of one account tree)
 	let flowRoot = '';
@@ -196,8 +210,77 @@
 		await refresh();
 	}
 
+	async function handleRangeSelected(msMin: number | null, msMax: number | null) {
+		if (msMin == null || msMax == null) {
+			clearSelection();
+			return;
+		}
+		const s = fmtDate(new Date(msMin));
+		const e = fmtDate(new Date(msMax));
+		selRange = { start: s, end: e };
+		if (!beancountDB) return;
+		selectedTransactions = await beancountDB.getTransactions(selectedAccount, includeDescendants, s, e);
+	}
+
+	function clearSelection() {
+		selPxStart = null;
+		selPxEnd = null;
+		selDragging = false;
+		selRange = null;
+		selectedTransactions = [];
+		chart?.draw();
+	}
+
+	// Chart.js plugin: drag across the plot to highlight a date range, then emit it.
+	const rangeSelectPlugin = {
+		id: 'rangeSelect',
+		afterEvent(chart: any, args: any) {
+			const e = args.event;
+			const area = chart.chartArea;
+			const clamp = (x: number) => Math.min(Math.max(x, area.left), area.right);
+			if (e.type === 'mousedown') {
+				selDragging = true;
+				selPxStart = clamp(e.x);
+				selPxEnd = selPxStart;
+				args.changed = true;
+			} else if (e.type === 'mousemove' && selDragging) {
+				selPxEnd = clamp(e.x);
+				args.changed = true;
+			} else if ((e.type === 'mouseup' || e.type === 'mouseout') && selDragging) {
+				selDragging = false;
+				if (selPxStart != null && selPxEnd != null && Math.abs(selPxEnd - selPxStart) > 4) {
+					const a = chart.scales.x.getValueForPixel(Math.min(selPxStart, selPxEnd));
+					const b = chart.scales.x.getValueForPixel(Math.max(selPxStart, selPxEnd));
+					handleRangeSelected(a, b);
+				} else {
+					handleRangeSelected(null, null);
+				}
+				args.changed = true;
+			}
+		},
+		afterDraw(chart: any) {
+			if (selPxStart == null || selPxEnd == null) return;
+			const { ctx, chartArea: area } = chart;
+			const left = Math.min(selPxStart, selPxEnd);
+			const right = Math.max(selPxStart, selPxEnd);
+			ctx.save();
+			ctx.fillStyle = 'rgba(37, 99, 235, 0.12)';
+			ctx.fillRect(left, area.top, right - left, area.bottom - area.top);
+			ctx.strokeStyle = 'rgba(37, 99, 235, 0.6)';
+			ctx.lineWidth = 1;
+			ctx.strokeRect(left, area.top, right - left, area.bottom - area.top);
+			ctx.restore();
+		}
+	};
+
 	async function renderTrends() {
 		if (!beancountDB || !selectedAccount) return;
+		// A re-render invalidates pixel selections (axis may change).
+		selPxStart = null;
+		selPxEnd = null;
+		selDragging = false;
+		selRange = null;
+		selectedTransactions = [];
 		runningAverageData = await beancountDB.getRunningAverage(
 			selectedAccount, includeDescendants, windowSize, startDate, endDate, showDailyRate, useEMA
 		);
@@ -303,10 +386,12 @@
 		chart = new Chart(ctx, {
 			type: 'line',
 			data: { datasets },
+			plugins: [rangeSelectPlugin],
 			options: {
 				responsive: true,
 				maintainAspectRatio: false,
 				animation: false,
+				events: ['mousedown', 'mousemove', 'mouseup', 'mouseout', 'click', 'touchstart', 'touchmove', 'touchend'],
 				interaction: { mode: 'index', intersect: false },
 				scales: {
 					x: {
@@ -1032,12 +1117,88 @@
 							class="chart-viewport h-[28rem] w-full overflow-auto rounded-md border border-gray-100"
 							on:wheel={handleWheel}
 						>
-							<div class="chart-stage" style="width: {100 * zoom}%; height: {28 * zoom}rem;">
+							<div class="chart-stage select-none" style="width: {100 * zoom}%; height: {28 * zoom}rem;">
 								<canvas id="chart"></canvas>
 							</div>
 						</div>
-						<p class="mt-1 text-xs text-gray-400">Ctrl/⌘ + scroll to zoom · drag the scrollbars to pan.</p>
+						<p class="mt-1 text-xs text-gray-400">
+							Ctrl/⌘ + scroll to zoom · drag the scrollbars to pan{#if view === 'trends'} · <span class="text-gray-500">drag across the chart to select a range and list its transactions</span>{/if}.
+						</p>
 					</div>
+
+					<!-- Selected-range transactions -->
+					{#if view === 'trends' && selRange}
+						<div class="mb-6 rounded-lg border border-blue-100 bg-blue-50/40">
+							<div class="flex flex-wrap items-center justify-between gap-3 border-b border-blue-100 px-4 py-3">
+								<div>
+									<h3 class="text-sm font-semibold text-gray-800">
+										Transactions {selRange.start} → {selRange.end}
+									</h3>
+									<p class="text-xs text-gray-500">
+										{selectedTransactions.length}
+										{selectedTransactions.length === 1 ? 'posting' : 'postings'} · net €{selTotal.toFixed(2)}
+									</p>
+								</div>
+								<div class="flex items-center gap-2">
+									<div class="inline-flex overflow-hidden rounded-md border border-gray-300 text-sm">
+										<button
+											on:click={() => (txSort = 'amount')}
+											class="px-2.5 py-1 {txSort === 'amount' ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}"
+										>
+											Biggest
+										</button>
+										<button
+											on:click={() => (txSort = 'date')}
+											class="border-l border-gray-300 px-2.5 py-1 {txSort === 'date' ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}"
+										>
+											By date
+										</button>
+									</div>
+									<button
+										on:click={clearSelection}
+										class="rounded-md border border-gray-300 bg-white px-2.5 py-1 text-sm text-gray-600 hover:bg-gray-50"
+									>
+										Clear
+									</button>
+								</div>
+							</div>
+							{#if selectedTransactions.length === 0}
+								<p class="px-4 py-4 text-sm text-gray-500">No transactions in this range.</p>
+							{:else}
+								<div class="max-h-80 overflow-auto">
+									<table class="w-full text-sm">
+										<thead class="sticky top-0 bg-white text-left text-xs uppercase tracking-wide text-gray-400">
+											<tr>
+												<th class="px-4 py-2 font-medium">Date</th>
+												<th class="px-4 py-2 font-medium">Description</th>
+												{#if includeDescendants}
+													<th class="px-4 py-2 font-medium">Account</th>
+												{/if}
+												<th class="px-4 py-2 text-right font-medium">Amount</th>
+											</tr>
+										</thead>
+										<tbody>
+											{#each sortedTransactions as t}
+												<tr class="border-t border-gray-100 hover:bg-white">
+													<td class="whitespace-nowrap px-4 py-2 text-gray-500">{t.date}</td>
+													<td class="px-4 py-2 text-gray-800">
+														{t.payee || t.narration || '—'}
+														{#if t.payee && t.narration && t.payee !== t.narration}<span class="text-gray-400"> · {t.narration}</span>{/if}
+													</td>
+													{#if includeDescendants}
+														<td class="px-4 py-2 text-gray-500">{t.account}</td>
+													{/if}
+													<td class="whitespace-nowrap px-4 py-2 text-right tabular-nums {t.amount < 0 ? 'text-red-600' : 'text-gray-800'}">
+														€{t.amount.toFixed(2)}
+													</td>
+												</tr>
+											{/each}
+										</tbody>
+									</table>
+								</div>
+							{/if}
+						</div>
+					{/if}
 
 					<!-- Stats -->
 					{#if view === 'trends'}

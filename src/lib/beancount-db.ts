@@ -1,4 +1,5 @@
 import initSqlJs, { type Database } from 'sql.js';
+import { base } from '$app/paths';
 
 export interface BeancountTransaction {
 	id: string;
@@ -23,6 +24,16 @@ export interface BeancountDB {
 	getRunningAverage: (account: string, includeDescendants: boolean, windowSize?: number, startDate?: string, endDate?: string, showDailyRate?: boolean, useEMA?: boolean) => Promise<{ date: string; balance: number; runningAverage: number }[]>;
 	getCashFlow: (options?: CashFlowOptions) => Promise<CashFlowResult>;
 	getDateRange: () => Promise<{ start: string; end: string } | null>;
+	getTransactions: (account: string, includeDescendants: boolean, startDate?: string, endDate?: string) => Promise<TransactionRow[]>;
+}
+
+export interface TransactionRow {
+	date: string;
+	payee: string;
+	narration: string;
+	account: string;
+	amount: number;
+	currency: string;
 }
 
 export interface CashFlowOptions {
@@ -58,7 +69,9 @@ export async function createBeancountDB(): Promise<BeancountDB> {
 		let SQL;
 		try {
 			SQL = await initSqlJs({
-				locateFile: (file) => `/${file}`
+				// Prefix with SvelteKit's base path so it resolves under
+				// GitHub Pages project subpaths (e.g. /beancount-importer/sql-wasm.wasm).
+				locateFile: (file) => `${base}/${file}`
 			});
 		} catch (error) {
 			console.warn('Failed to load SQL.js with locateFile, trying default:', error);
@@ -153,13 +166,30 @@ export async function createBeancountDB(): Promise<BeancountDB> {
 
 						// Start new transaction with globally unique ID
 						const [, date, description] = transactionMatch;
-						const [payee, narration] = description.split(' | ').map(s => s.trim());
-						
+						// Beancount headers are `"payee" "narration"` or just `"narration"`.
+						// Also support the legacy single-string `payee | narration` form.
+						const quoted = [...trimmedLine.matchAll(/"([^"]*)"/g)].map((q) => q[1]);
+						let payee = '';
+						let narration = '';
+						if (quoted.length >= 2) {
+							payee = quoted[0];
+							narration = quoted[1];
+						} else {
+							const single = quoted.length === 1 ? quoted[0] : description.trim();
+							const parts = single.split(' | ').map((s) => s.trim());
+							if (parts.length > 1) {
+								payee = parts[0];
+								narration = parts.slice(1).join(' | ');
+							} else {
+								narration = single;
+							}
+						}
+
 						currentTransaction = {
 							id: `${file.name}_${globalTransactionId++}`, // Make ID unique across files
 							date,
-							payee: payee || '',
-							narration: narration || description,
+							payee,
+							narration,
 							postings: []
 						};
 						continue;
@@ -453,6 +483,46 @@ export async function createBeancountDB(): Promise<BeancountDB> {
 			const row = result[0]?.values[0];
 			if (!row || row[0] == null) return null;
 			return { start: row[0] as string, end: row[1] as string };
+		},
+
+		getTransactions: async (account: string, includeDescendants: boolean, startDate?: string, endDate?: string) => {
+			let accountFilter = `p.account = ?`;
+			const params: string[] = [account];
+
+			if (includeDescendants) {
+				accountFilter = `(p.account = ? OR p.account LIKE ?)`;
+				params.push(`${account}:%`);
+			}
+
+			let dateFilter = '';
+			if (startDate && endDate) {
+				dateFilter = `AND t.date >= ? AND t.date <= ?`;
+				params.push(startDate, endDate);
+			} else if (startDate) {
+				dateFilter = `AND t.date >= ?`;
+				params.push(startDate);
+			} else if (endDate) {
+				dateFilter = `AND t.date <= ?`;
+				params.push(endDate);
+			}
+
+			const result = db.exec(`
+				SELECT t.date, t.payee, t.narration, p.account, p.amount, p.currency
+				FROM postings p
+				JOIN transactions t ON p.transaction_id = t.id
+				WHERE ${accountFilter} ${dateFilter}
+				ORDER BY t.date ASC
+			`, params);
+
+			if (!result[0]) return [];
+			return result[0].values.map((row: any[]) => ({
+				date: row[0] as string,
+				payee: (row[1] as string) ?? '',
+				narration: (row[2] as string) ?? '',
+				account: row[3] as string,
+				amount: row[4] as number,
+				currency: (row[5] as string) ?? 'EUR'
+			}));
 		},
 
 		getCashFlow: async (options: CashFlowOptions = {}) => {
