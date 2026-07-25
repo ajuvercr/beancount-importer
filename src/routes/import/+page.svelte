@@ -25,6 +25,7 @@
 	let remainingTransactions: ParsedTransaction[] = [];
 	let checkedTransactions: Set<string> = new Set();
 	let isGenerating = false;
+	let generateError: string | null = null;
 	let accountSearchQuery: string = '';
 	let filteredAccounts: BeancountAccount[] = [];
 	let searchInput: HTMLInputElement;
@@ -39,6 +40,18 @@
 
 	let undoHistory: UndoAction[] = [];
 	let maxUndoHistory = 50;
+
+	const MAPPING_PROGRESS_KEY = 'importMappingProgress';
+
+	function persistMappingProgress() {
+		sessionStorage.setItem(
+			MAPPING_PROGRESS_KEY,
+			JSON.stringify({
+				mappingEntries: Array.from(mapping.entries()),
+				remainingIds: remainingTransactions.map((t) => t.id)
+			})
+		);
+	}
 
 	// Global key handler for all keyboard navigation
 	function handleGlobalKeydown(e: KeyboardEvent) {
@@ -172,6 +185,30 @@
 		accounts = parsedAccounts;
 		remainingTransactions = [...parsedTransactions];
 
+		// Restore any in-progress mapping so a crash/reload doesn't lose categorization work
+		const storedProgress = sessionStorage.getItem(MAPPING_PROGRESS_KEY);
+		if (storedProgress) {
+			try {
+				const { mappingEntries, remainingIds } = JSON.parse(storedProgress) as {
+					mappingEntries: [string, string][];
+					remainingIds: string[];
+				};
+				const remainingIdSet = new Set(remainingIds);
+				const restoredMapping = new Map(mappingEntries);
+				// Only trust the restored progress if it lines up with the currently loaded transactions
+				const validIds = new Set(parsedTransactions.map((t: ParsedTransaction) => t.id));
+				const isConsistent = [...restoredMapping.keys()].every((id) => validIds.has(id));
+				if (isConsistent) {
+					mapping = restoredMapping;
+					remainingTransactions = parsedTransactions.filter((t: ParsedTransaction) =>
+						remainingIdSet.has(t.id)
+					);
+				}
+			} catch (err) {
+				console.warn('Failed to restore mapping progress', err);
+			}
+		}
+
 		// Force reactive update by explicitly setting filteredAccounts
 		filteredAccounts = parsedAccounts;
 
@@ -262,6 +299,8 @@
 		// Clear checked transactions
 		checkedTransactions = new Set();
 
+		persistMappingProgress();
+
 		// Get the current issuer index BEFORE updating issuer groups
 		const currentIndex = issuerGroups.findIndex((group) => group.issuer === selectedIssuer?.issuer);
 		console.log('- currentIndex before update:', currentIndex);
@@ -328,6 +367,8 @@
 
 			remainingTransactions = [...remainingTransactions, ...unmappedTransactions];
 
+			persistMappingProgress();
+
 			// Update issuer groups
 			updateIssuerGroups();
 
@@ -351,6 +392,8 @@
 
 		// Remove from remaining transactions
 		remainingTransactions = remainingTransactions.filter((t) => t.id !== transaction.id);
+
+		persistMappingProgress();
 
 		// Update issuer groups
 		updateIssuerGroups();
@@ -407,6 +450,7 @@
 
 	async function generateAndDownload() {
 		isGenerating = true;
+		generateError = null;
 		try {
 			const beancountContent = generateBeancountFile(transactions, mapping);
 			const blob = new Blob([beancountContent], { type: 'text/plain' });
@@ -418,6 +462,10 @@
 			a.click();
 			document.body.removeChild(a);
 			URL.revokeObjectURL(url);
+			sessionStorage.removeItem(MAPPING_PROGRESS_KEY);
+		} catch (err) {
+			console.error('Error generating beancount file:', err);
+			generateError = err instanceof Error ? err.message : 'Failed to generate beancount file';
 		} finally {
 			isGenerating = false;
 		}
@@ -682,6 +730,11 @@
 										{/if}
 									</button>
 								</div>
+								{#if generateError}
+									<div class="mt-4 rounded-md border border-red-200 bg-red-50 p-4">
+										<p class="text-sm text-red-600">{generateError}</p>
+									</div>
+								{/if}
 							</div>
 						{/if}
 					</div>

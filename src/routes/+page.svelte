@@ -44,6 +44,9 @@
 			// Store data in session storage for the import page
 			sessionStorage.setItem('transactions', JSON.stringify(transactions));
 			sessionStorage.setItem('accounts', JSON.stringify(accounts));
+			// Clear any mapping progress from a previous import - transaction IDs are
+			// index-based and would otherwise collide with this unrelated data
+			sessionStorage.removeItem('importMappingProgress');
 			console.log('Data stored in session storage');
 
 			// Navigate to import page

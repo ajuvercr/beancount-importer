@@ -291,6 +291,10 @@ export function groupTransactionsByIssuer(transactions: ParsedTransaction[]): Is
 	}).sort((a, b) => b.totalAmount - a.totalAmount); // Sort by total amount descending
 }
 
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 export function generateTransactionDescription(transaction: ParsedTransaction): string {
 	// Try to use parsed description information for better descriptions
 	const parsed = parseTransactionDescription(transaction.description);
@@ -315,11 +319,12 @@ export function generateTransactionDescription(transaction: ParsedTransaction): 
 			const originalDesc = transaction.description;
 			
 			// Look for patterns that might contain more descriptive info
+			const escapedName = escapeRegExp(parsed.name);
 			const patterns = [
 				// Look for anything after the merchant name in the original description
-				new RegExp(parsed.name + '\\s+(.+?)\\s+(BE\\d+|GENT|BRUGGE|BRUSSEL|ANTWERPEN)', 'i'),
+				new RegExp(escapedName + '\\s+(.+?)\\s+(BE\\d+|GENT|BRUGGE|BRUSSEL|ANTWERPEN)', 'i'),
 				// Look for anything between merchant name and location
-				new RegExp('UUR\\s+' + parsed.name + '\\s+(.+?)\\s+(BE\\d+|GENT|BRUGGE|BRUSSEL|ANTWERPEN)', 'i'),
+				new RegExp('UUR\\s+' + escapedName + '\\s+(.+?)\\s+(BE\\d+|GENT|BRUGGE|BRUSSEL|ANTWERPEN)', 'i'),
 				// Look for additional context after payment type
 				/.*?UUR\s+(.+?)\s+(BE\d+|GENT|BRUGGE|BRUSSEL|ANTWERPEN)/i
 			];
