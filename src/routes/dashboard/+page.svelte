@@ -1733,7 +1733,7 @@
 							class="chart-viewport h-[28rem] w-full overflow-auto rounded-md border border-gray-100"
 							on:wheel={handleWheel}
 						>
-							<div class="chart-stage select-none" style="width: {100 * zoom}%; height: {28 * zoom}rem;">
+							<div class="chart-stage select-none" style="width: {100 * zoom}%; height: {100 * zoom}%;">
 								<canvas id="chart"></canvas>
 							</div>
 						</div>
