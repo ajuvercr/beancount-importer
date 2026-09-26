@@ -1,6 +1,6 @@
 import { browser } from '$app/environment';
 
-export type ChartView = 'trends' | 'cashflow';
+export type ChartView = 'trends' | 'cashflow' | 'monthly' | 'income' | 'networth' | 'heatmap';
 
 export interface DashboardPreset {
 	id: string;
@@ -17,6 +17,13 @@ export interface DashboardPreset {
 	flowRoot: string;
 	flowMaxDepth: number;
 	flowMinAmount: number;
+	// Added later; optional so presets saved by older versions still load.
+	monthlyRoot?: string;
+	monthlyTopN?: number;
+	incomeRoot?: string;
+	expenseRoot?: string;
+	assetRoots?: string[];
+	liabilityRoots?: string[];
 	createdAt: number;
 }
 

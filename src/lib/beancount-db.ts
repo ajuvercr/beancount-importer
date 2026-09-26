@@ -25,6 +25,43 @@ export interface BeancountDB {
 	getCashFlow: (options?: CashFlowOptions) => Promise<CashFlowResult>;
 	getDateRange: () => Promise<{ start: string; end: string } | null>;
 	getTransactions: (account: string, includeDescendants: boolean, startDate?: string, endDate?: string) => Promise<TransactionRow[]>;
+	getMonthlyByAccount: (root: string, startDate?: string, endDate?: string) => Promise<MonthlyAccountRow[]>;
+	getDailyTotals: (account: string, includeDescendants: boolean, startDate?: string, endDate?: string) => Promise<{ date: string; amount: number }[]>;
+	getNetWorthHistory: (assetRoots: string[], liabilityRoots: string[], startDate?: string, endDate?: string) => Promise<NetWorthPoint[]>;
+}
+
+export interface MonthlyAccountRow {
+	month: string; // YYYY-MM
+	account: string;
+	amount: number;
+}
+
+export interface NetWorthPoint {
+	date: string;
+	assets: number;
+	liabilities: number;
+	netWorth: number;
+}
+
+// SQL filter matching an account and its true descendants (never prefix-siblings).
+function subtreeFilter(column: string, roots: string[]): { sql: string; params: string[] } {
+	if (roots.length === 0) return { sql: '0', params: [] };
+	const sql = roots.map(() => `(${column} = ? OR ${column} LIKE ?)`).join(' OR ');
+	return { sql: `(${sql})`, params: roots.flatMap((r) => [r, `${r}:%`]) };
+}
+
+function dateRangeFilter(column: string, startDate?: string, endDate?: string): { sql: string; params: string[] } {
+	const parts: string[] = [];
+	const params: string[] = [];
+	if (startDate) {
+		parts.push(`${column} >= ?`);
+		params.push(startDate);
+	}
+	if (endDate) {
+		parts.push(`${column} <= ?`);
+		params.push(endDate);
+	}
+	return { sql: parts.length ? parts.join(' AND ') : '1', params };
 }
 
 export interface TransactionRow {
@@ -523,6 +560,89 @@ export async function createBeancountDB(): Promise<BeancountDB> {
 				amount: row[4] as number,
 				currency: (row[5] as string) ?? 'EUR'
 			}));
+		},
+
+		getMonthlyByAccount: async (root: string, startDate?: string, endDate?: string) => {
+			const acc = subtreeFilter('p.account', [root]);
+			const dates = dateRangeFilter('t.date', startDate, endDate);
+			const result = db.exec(
+				`SELECT substr(t.date, 1, 7) AS month, p.account, SUM(p.amount)
+				 FROM postings p
+				 JOIN transactions t ON p.transaction_id = t.id
+				 WHERE ${acc.sql} AND ${dates.sql}
+				 GROUP BY month, p.account
+				 ORDER BY month`,
+				[...acc.params, ...dates.params]
+			);
+			if (!result[0]) return [];
+			return result[0].values.map((row: any[]) => ({
+				month: row[0] as string,
+				account: row[1] as string,
+				amount: row[2] as number
+			}));
+		},
+
+		getDailyTotals: async (account: string, includeDescendants: boolean, startDate?: string, endDate?: string) => {
+			const acc = includeDescendants
+				? subtreeFilter('p.account', [account])
+				: { sql: 'p.account = ?', params: [account] };
+			const dates = dateRangeFilter('t.date', startDate, endDate);
+			const result = db.exec(
+				`SELECT t.date, SUM(p.amount)
+				 FROM postings p
+				 JOIN transactions t ON p.transaction_id = t.id
+				 WHERE ${acc.sql} AND ${dates.sql}
+				 GROUP BY t.date
+				 ORDER BY t.date`,
+				[...acc.params, ...dates.params]
+			);
+			if (!result[0]) return [];
+			return result[0].values.map((row: any[]) => ({ date: row[0] as string, amount: row[1] as number }));
+		},
+
+		getNetWorthHistory: async (assetRoots: string[], liabilityRoots: string[], startDate?: string, endDate?: string) => {
+			const assets = subtreeFilter('p.account', assetRoots);
+			const liabs = subtreeFilter('p.account', liabilityRoots);
+			// Balances are cumulative from the very first transaction, so only the
+			// end date bounds the query; the start date just trims the output.
+			const dates = dateRangeFilter('t.date', undefined, endDate);
+			const result = db.exec(
+				`SELECT t.date,
+					SUM(CASE WHEN ${assets.sql} THEN p.amount ELSE 0 END),
+					SUM(CASE WHEN ${liabs.sql} THEN p.amount ELSE 0 END)
+				 FROM postings p
+				 JOIN transactions t ON p.transaction_id = t.id
+				 WHERE (${assets.sql} OR ${liabs.sql}) AND ${dates.sql}
+				 GROUP BY t.date
+				 ORDER BY t.date`,
+				[...assets.params, ...liabs.params, ...assets.params, ...liabs.params, ...dates.params]
+			);
+			if (!result[0]) return [];
+
+			const out: NetWorthPoint[] = [];
+			let a = 0;
+			let l = 0;
+			let opening: NetWorthPoint | null = null;
+			const point = (date: string): NetWorthPoint => ({
+				date,
+				assets: Math.round(a * 100) / 100,
+				liabilities: Math.round(l * 100) / 100,
+				netWorth: Math.round((a + l) * 100) / 100
+			});
+			for (const row of result[0].values as [string, number, number][]) {
+				a += row[1];
+				l += row[2];
+				if (startDate && row[0] < startDate) {
+					opening = point(startDate);
+					continue;
+				}
+				// Carry the balance held before the range in as its opening point.
+				if (opening && row[0] !== startDate) out.push(opening);
+				opening = null;
+				out.push(point(row[0]));
+			}
+			if (opening) out.push(opening);
+			return out;
 		},
 
 		getCashFlow: async (options: CashFlowOptions = {}) => {

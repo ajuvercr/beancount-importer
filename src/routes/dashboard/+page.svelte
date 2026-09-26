@@ -1,8 +1,14 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
-	import { createBeancountDB, type BeancountDB, type CashFlowLink, type TransactionRow } from '$lib/beancount-db';
+	import {
+		createBeancountDB,
+		type BeancountDB,
+		type CashFlowLink,
+		type NetWorthPoint,
+		type TransactionRow
+	} from '$lib/beancount-db';
 	import Chart from 'chart.js/auto';
 	import 'chartjs-adapter-date-fns';
 	import { SankeyController, Flow } from 'chartjs-chart-sankey';
@@ -46,6 +52,8 @@
 	let selPxEnd: number | null = null;
 	let selDragging = false;
 	let selRange: { start: string; end: string } | null = null;
+	let selLabel = '';
+	let selShowAccount = false;
 	let selectedTransactions: TransactionRow[] = [];
 	let txSort: 'amount' | 'date' = 'amount';
 	$: sortedTransactions = [...selectedTransactions].sort((a, b) =>
@@ -62,6 +70,30 @@
 	let cashFlow: CashFlowLink[] = [];
 	let cashFlowTotal = 0;
 	let topRoots: string[] = [];
+
+	// Monthly breakdown: stacked bars of a group account's direct children.
+	let monthlyRoot = '';
+	let monthlyTopN = 6;
+	let monthlyStats = { total: 0, avg: 0, months: 0, top: '' };
+
+	// Income vs expenses per month.
+	let incomeRoot = '';
+	let expenseRoot = '';
+	let incomeStats = { income: 0, expenses: 0, net: 0, rate: null as number | null };
+
+	// Net worth = assets + liabilities (liabilities carry negative balances).
+	let assetRoots: string[] = [];
+	let liabilityRoots: string[] = [];
+	let netWorthData: NetWorthPoint[] = [];
+
+	// Calendar heatmap of daily totals for the selected account.
+	type HeatCell = { date: string; x: number; y: number; amount: number | null; color: string };
+	type HeatYear = { year: number; width: number; cells: HeatCell[]; months: { label: string; x: number }[] };
+	let heatYears: HeatYear[] = [];
+	let heatLegend: string[] = [];
+	let heatStats = { total: 0, activeDays: 0, perDay: 0, maxDate: '', max: 0 };
+	let heatHover: HeatCell | null = null;
+	let heatFlip = 1;
 
 	let dataFiles: StoredFile[] = [];
 	let dataRange: { start: string; end: string } | null = null;
@@ -95,6 +127,29 @@
 		'#2563eb', '#16a34a', '#dc2626', '#d97706', '#7c3aed',
 		'#0891b2', '#db2777', '#65a30d', '#ca8a04', '#4f46e5'
 	];
+
+	// Categorical series colors for the bar/line views, assigned in fixed order.
+	// Anything past the last slot folds into a gray "Other".
+	const series = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948'];
+	const otherColor = '#a8a7a2';
+	const inkColor = '#374151';
+	// Sequential (magnitude) and opposite-sign ramps for the heatmap.
+	const heatRamp = ['#cde2fb', '#9ec5f4', '#6da7ec', '#3987e5', '#256abf', '#184f95'];
+	const heatNegRamp = ['#f6c9c8', '#ee9392', '#e34948'];
+	const heatEmpty = '#ebeae6';
+
+	const tabs: { id: ChartView; label: string }[] = [
+		{ id: 'trends', label: 'Balance & Trends' },
+		{ id: 'cashflow', label: 'Cash Flow (Hierarchy)' },
+		{ id: 'monthly', label: 'Monthly by Category' },
+		{ id: 'income', label: 'Income vs Expenses' },
+		{ id: 'networth', label: 'Net Worth' },
+		{ id: 'heatmap', label: 'Calendar' }
+	];
+	$: supportsCompare = view === 'trends' || view === 'cashflow';
+
+	const eur = (v: number) =>
+		`${v < 0 ? '−' : ''}€${Math.abs(v).toLocaleString('nl-BE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 	function nodeColor(id: string): string {
 		const root = id.split(':')[0];
@@ -180,6 +235,7 @@
 
 			topRoots = deriveRoots(accounts);
 			flowRoot = topRoots.find((r) => /uitgave|expense/i.test(r)) || topRoots[0] || '';
+			applyRootDefaults();
 
 			selectedAccount = accounts[0];
 			if (dataRange) {
@@ -195,19 +251,48 @@
 		}
 	});
 
+	// Guess the conventional roots (English or Dutch naming) when unset/stale.
+	function applyRootDefaults() {
+		const find = (re: RegExp) => topRoots.find((r) => re.test(r)) || '';
+		if (!accounts.includes(monthlyRoot)) monthlyRoot = flowRoot;
+		if (!topRoots.includes(expenseRoot)) expenseRoot = find(/uitgave|expense/i);
+		if (!topRoots.includes(incomeRoot)) incomeRoot = find(/inkomst|income|opbrengst|revenue/i);
+		assetRoots = assetRoots.filter((r) => topRoots.includes(r));
+		liabilityRoots = liabilityRoots.filter((r) => topRoots.includes(r));
+		if (assetRoots.length === 0) assetRoots = topRoots.filter((r) => /^(assets?|activa|bezit)/i.test(r));
+		if (liabilityRoots.length === 0) liabilityRoots = topRoots.filter((r) => /^(liabilit|passiva|schuld)/i.test(r));
+	}
+
 	async function refresh() {
 		if (!beancountDB) return;
 		error = null;
-		if (view === 'trends') {
-			await renderTrends();
-		} else {
-			await renderCashFlow();
+		clearSelection();
+		if (view === 'heatmap') {
+			chart?.destroy();
+			chart = null;
+			await renderHeatmap();
+			return;
 		}
+		// The canvas only exists outside the calendar view; let the DOM catch up.
+		await tick();
+		if (view === 'trends') await renderTrends();
+		else if (view === 'cashflow') await renderCashFlow();
+		else if (view === 'monthly') await renderMonthly();
+		else if (view === 'income') await renderIncome();
+		else if (view === 'networth') await renderNetWorth();
 	}
 
 	async function setView(v: ChartView) {
 		view = v;
 		await refresh();
+	}
+
+	async function showTransactions(label: string, account: string, withDescendants: boolean, start: string, end: string) {
+		if (!beancountDB) return;
+		selRange = { start, end };
+		selLabel = label;
+		selShowAccount = withDescendants;
+		selectedTransactions = await beancountDB.getTransactions(account, withDescendants, start, end);
 	}
 
 	async function handleRangeSelected(msMin: number | null, msMax: number | null) {
@@ -217,9 +302,7 @@
 		}
 		const s = fmtDate(new Date(msMin));
 		const e = fmtDate(new Date(msMax));
-		selRange = { start: s, end: e };
-		if (!beancountDB) return;
-		selectedTransactions = await beancountDB.getTransactions(selectedAccount, includeDescendants, s, e);
+		await showTransactions(selectedAccount, selectedAccount, includeDescendants, s, e);
 	}
 
 	function clearSelection() {
@@ -228,7 +311,7 @@
 		selDragging = false;
 		selRange = null;
 		selectedTransactions = [];
-		chart?.draw();
+		if (view === 'trends') chart?.draw();
 	}
 
 	// Chart.js plugin: drag across the plot to highlight a date range, then emit it.
@@ -581,6 +664,385 @@
 		});
 	}
 
+	// Every YYYY-MM between two dates (inclusive), so empty months still show.
+	function monthsBetween(first: string, last: string): string[] {
+		const out: string[] = [];
+		let [y, m] = first.slice(0, 7).split('-').map(Number);
+		const [ly, lm] = last.slice(0, 7).split('-').map(Number);
+		while (y < ly || (y === ly && m <= lm)) {
+			out.push(`${y}-${String(m).padStart(2, '0')}`);
+			if (++m > 12) {
+				m = 1;
+				y++;
+			}
+		}
+		return out;
+	}
+
+	const monthLabel = (ym: string) => {
+		const [y, m] = ym.split('-').map(Number);
+		return new Date(y, m - 1, 1).toLocaleDateString('en-GB', { month: 'short', year: 'numeric' });
+	};
+
+	function monthBounds(ym: string): { start: string; end: string } {
+		const [y, m] = ym.split('-').map(Number);
+		return { start: fmtDate(new Date(y, m - 1, 1)), end: fmtDate(new Date(y, m, 0)) };
+	}
+
+	// Month axis for the selected range, falling back to the months with data.
+	function monthAxis(dataMonths: string[]): string[] {
+		const first = startDate || dataMonths[0];
+		const last = endDate || dataMonths[dataMonths.length - 1];
+		return first && last ? monthsBetween(first, last) : [];
+	}
+
+	// Map an account onto the direct child of `root` it belongs to.
+	function childOf(root: string, account: string): string {
+		if (account === root) return root;
+		const depth = root.split(':').length;
+		return account.split(':').slice(0, depth + 1).join(':');
+	}
+
+	const barOptions = (title: string, stacked: boolean, onClick?: (el: any) => void): any => ({
+		responsive: true,
+		maintainAspectRatio: false,
+		animation: false,
+		interaction: { mode: 'index', intersect: false },
+		onClick: onClick
+			? (_e: any, els: any[]) => {
+					if (els.length) onClick(els[0]);
+				}
+			: undefined,
+		scales: {
+			x: { stacked, grid: { display: false } },
+			y: {
+				stacked,
+				title: { display: true, text: 'EUR' },
+				grid: {
+					color: (c: any) => (c.tick?.value === 0 ? 'rgba(0,0,0,0.35)' : 'rgba(0,0,0,0.05)')
+				}
+			}
+		},
+		plugins: {
+			title: { display: true, text: title },
+			legend: { position: 'top' },
+			tooltip: {
+				filter: (c: any) => c.parsed.y !== 0,
+				callbacks: { label: (c: any) => `${c.dataset.label}: ${eur(Number(c.parsed.y))}` }
+			}
+		}
+	});
+
+	async function renderMonthly() {
+		if (!beancountDB || !monthlyRoot) return;
+		const ctx = document.getElementById('chart') as HTMLCanvasElement;
+		if (!ctx) return;
+		if (chart) chart.destroy();
+		chart = null;
+
+		const rows = await beancountDB.getMonthlyByAccount(monthlyRoot, startDate, endDate);
+		if (rows.length === 0) {
+			monthlyStats = { total: 0, avg: 0, months: 0, top: '' };
+			error = `No postings under "${monthlyRoot}" in this range.`;
+			return;
+		}
+
+		// Color follows the category, not its rank in this range: rank children
+		// by all-time size so changing the dates never repaints a category.
+		const allTime = await beancountDB.getMonthlyByAccount(monthlyRoot);
+		const sizes = new Map<string, number>();
+		let allTotal = 0;
+		for (const r of allTime) {
+			const c = childOf(monthlyRoot, r.account);
+			sizes.set(c, (sizes.get(c) || 0) + r.amount);
+			allTotal += r.amount;
+		}
+		// Income-like trees are negative in beancount; show them as positive.
+		const sign = allTotal < 0 ? -1 : 1;
+		const ranked = [...sizes.keys()].sort((a, b) => Math.abs(sizes.get(b)!) - Math.abs(sizes.get(a)!));
+		const topN = Math.max(1, Math.min(monthlyTopN, series.length));
+		const shown = ranked.length > topN ? ranked.slice(0, topN - 1) : ranked;
+		const shownSet = new Set(shown);
+
+		const months = monthAxis(rows.map((r) => r.month));
+		const idx = new Map(months.map((m, i) => [m, i]));
+		const byCat = new Map<string, number[]>();
+		const other = new Array(months.length).fill(0);
+		for (const r of rows) {
+			const i = idx.get(r.month);
+			if (i == null) continue;
+			const c = childOf(monthlyRoot, r.account);
+			const target = shownSet.has(c) ? byCat.get(c) || byCat.set(c, new Array(months.length).fill(0)).get(c)! : other;
+			target[i] += sign * r.amount;
+		}
+
+		const label = (c: string) => (c === monthlyRoot ? `${c.split(':').pop()} (direct)` : c.split(':').pop()!);
+		const datasets: any[] = shown
+			.filter((c) => byCat.has(c))
+			.map((c) => ({
+				label: label(c),
+				account: c,
+				data: byCat.get(c)!.map((v) => Math.round(v * 100) / 100),
+				backgroundColor: series[ranked.indexOf(c)],
+				borderColor: '#ffffff',
+				borderWidth: 1,
+				stack: 'cat'
+			}));
+		if (other.some((v) => v !== 0)) {
+			datasets.push({
+				label: `Other (${ranked.length - shown.length})`,
+				account: null,
+				data: other.map((v) => Math.round(v * 100) / 100),
+				backgroundColor: otherColor,
+				borderColor: '#ffffff',
+				borderWidth: 1,
+				stack: 'cat'
+			});
+		}
+
+		const totals = months.map((_, i) => datasets.reduce((s, d) => s + d.data[i], 0));
+		const total = totals.reduce((a, b) => a + b, 0);
+		const biggest = [...byCat.entries()].sort(
+			(a, b) => b[1].reduce((x, y) => x + y, 0) - a[1].reduce((x, y) => x + y, 0)
+		)[0];
+		monthlyStats = {
+			total,
+			avg: months.length ? total / months.length : 0,
+			months: months.length,
+			top: biggest ? label(biggest[0]) : ''
+		};
+
+		const options = barOptions(`${monthlyRoot} — per month by sub-account`, true, (el) => {
+			const d = datasets[el.datasetIndex];
+			const { start, end } = monthBounds(months[el.index]);
+			if (d.account) showTransactions(`${d.account} · ${monthLabel(months[el.index])}`, d.account, true, start, end);
+			else showTransactions(`${monthlyRoot} · ${monthLabel(months[el.index])}`, monthlyRoot, true, start, end);
+		});
+		options.plugins.tooltip.callbacks.footer = (items: any[]) =>
+			items.length ? `Total: ${eur(totals[items[0].dataIndex])}` : '';
+
+		chart = new Chart(ctx, {
+			type: 'bar',
+			data: { labels: months.map(monthLabel), datasets },
+			options
+		});
+	}
+
+	async function renderIncome() {
+		if (!beancountDB) return;
+		const ctx = document.getElementById('chart') as HTMLCanvasElement;
+		if (!ctx) return;
+		if (chart) chart.destroy();
+		chart = null;
+
+		if (!incomeRoot || !expenseRoot) {
+			incomeStats = { income: 0, expenses: 0, net: 0, rate: null };
+			error = 'Pick both an income and an expenses account.';
+			return;
+		}
+		const [inc, exp] = await Promise.all([
+			beancountDB.getMonthlyByAccount(incomeRoot, startDate, endDate),
+			beancountDB.getMonthlyByAccount(expenseRoot, startDate, endDate)
+		]);
+		if (inc.length === 0 && exp.length === 0) {
+			incomeStats = { income: 0, expenses: 0, net: 0, rate: null };
+			error = 'No income or expenses in this range.';
+			return;
+		}
+
+		const months = monthAxis([...inc, ...exp].map((r) => r.month).sort());
+		const idx = new Map(months.map((m, i) => [m, i]));
+		const income = new Array(months.length).fill(0);
+		const expenses = new Array(months.length).fill(0);
+		// Income postings are negative in beancount; flip them to read as earnings.
+		for (const r of inc) if (idx.has(r.month)) income[idx.get(r.month)!] -= r.amount;
+		for (const r of exp) if (idx.has(r.month)) expenses[idx.get(r.month)!] += r.amount;
+		const round = (v: number) => Math.round(v * 100) / 100;
+		const net = months.map((_, i) => round(income[i] - expenses[i]));
+
+		const ti = income.reduce((a, b) => a + b, 0);
+		const te = expenses.reduce((a, b) => a + b, 0);
+		incomeStats = { income: ti, expenses: te, net: ti - te, rate: ti > 0 ? (ti - te) / ti : null };
+
+		const options = barOptions(`${incomeRoot} vs ${expenseRoot} — per month`, false, (el) => {
+			const { start, end } = monthBounds(months[el.index]);
+			const acc = el.datasetIndex === 1 ? expenseRoot : incomeRoot;
+			showTransactions(`${acc} · ${monthLabel(months[el.index])}`, acc, true, start, end);
+		});
+		options.plugins.tooltip.callbacks.footer = (items: any[]) => {
+			if (!items.length) return '';
+			const i = items[0].dataIndex;
+			return income[i] > 0 ? `Savings rate: ${Math.round((net[i] / income[i]) * 100)}%` : '';
+		};
+
+		chart = new Chart(ctx, {
+			type: 'bar',
+			data: {
+				labels: months.map(monthLabel),
+				datasets: [
+					{ label: 'Income', data: income.map(round), backgroundColor: series[0], borderRadius: 4, order: 2 },
+					{ label: 'Expenses', data: expenses.map(round), backgroundColor: series[1], borderRadius: 4, order: 2 },
+					{
+						type: 'line',
+						label: 'Net (saved)',
+						data: net,
+						borderColor: inkColor,
+						backgroundColor: inkColor,
+						borderWidth: 2,
+						pointRadius: 4,
+						pointBorderColor: '#ffffff',
+						pointBorderWidth: 2,
+						tension: 0.2,
+						order: 1
+					} as any
+				]
+			},
+			options
+		});
+	}
+
+	async function renderNetWorth() {
+		if (!beancountDB) return;
+		const ctx = document.getElementById('chart') as HTMLCanvasElement;
+		if (!ctx) return;
+		if (chart) chart.destroy();
+		chart = null;
+
+		if (assetRoots.length === 0 && liabilityRoots.length === 0) {
+			netWorthData = [];
+			error = 'Tick at least one asset or liability account.';
+			return;
+		}
+		netWorthData = await beancountDB.getNetWorthHistory(assetRoots, liabilityRoots, startDate, endDate);
+		if (netWorthData.length === 0) {
+			error = 'No asset or liability postings up to this date.';
+			return;
+		}
+
+		const line = (label: string, key: 'netWorth' | 'assets' | 'liabilities', color: string, extra: any = {}) => ({
+			label,
+			data: netWorthData.map((d) => ({ x: d.date, y: d[key] })),
+			borderColor: color,
+			backgroundColor: color,
+			borderWidth: 2,
+			pointRadius: 0,
+			stepped: true,
+			...extra
+		});
+		const datasets: any[] = [
+			line('Net worth', 'netWorth', series[0], { fill: 'origin', backgroundColor: 'rgba(42, 120, 214, 0.10)', borderWidth: 2.5 })
+		];
+		if (assetRoots.length && liabilityRoots.length) {
+			datasets.push(line('Assets', 'assets', series[2], { borderDash: [5, 4] }));
+			datasets.push(line('Liabilities', 'liabilities', series[1], { borderDash: [5, 4] }));
+		}
+
+		chart = new Chart(ctx, {
+			type: 'line',
+			data: { datasets },
+			options: {
+				responsive: true,
+				maintainAspectRatio: false,
+				animation: false,
+				interaction: { mode: 'index', intersect: false },
+				scales: {
+					x: { type: 'time', time: { unit: 'month', tooltipFormat: 'yyyy-MM-dd' }, grid: { display: false } },
+					y: {
+						title: { display: true, text: 'EUR' },
+						grid: { color: (c: any) => (c.tick?.value === 0 ? 'rgba(0,0,0,0.35)' : 'rgba(0,0,0,0.05)') }
+					}
+				},
+				plugins: {
+					title: { display: true, text: 'Net worth (assets + liabilities)' },
+					legend: { position: 'top' },
+					tooltip: { callbacks: { label: (c: any) => `${c.dataset.label}: ${eur(Number(c.parsed.y))}` } }
+				}
+			} as any
+		});
+	}
+
+	function toggleRoot(list: 'asset' | 'liability', root: string, on: boolean) {
+		if (list === 'asset') assetRoots = on ? [...assetRoots, root] : assetRoots.filter((r) => r !== root);
+		else liabilityRoots = on ? [...liabilityRoots, root] : liabilityRoots.filter((r) => r !== root);
+		refresh();
+	}
+
+	const HEAT_CELL = 13;
+	const HEAT_GAP = 3;
+	const HEAT_LEFT = 28;
+	const HEAT_TOP = 16;
+
+	async function renderHeatmap() {
+		if (!beancountDB || !selectedAccount) return;
+		const days = await beancountDB.getDailyTotals(selectedAccount, includeDescendants, startDate, endDate);
+		heatHover = null;
+		if (days.length === 0) {
+			heatYears = [];
+			heatStats = { total: 0, activeDays: 0, perDay: 0, maxDate: '', max: 0 };
+			error = `No postings for "${selectedAccount}" in this range.`;
+			return;
+		}
+
+		// Show whichever direction dominates as positive (e.g. income, expenses).
+		const rawTotal = days.reduce((s, d) => s + d.amount, 0);
+		heatFlip = rawTotal < 0 ? -1 : 1;
+		const values = new Map(days.map((d) => [d.date, heatFlip * d.amount]));
+
+		// Bucket by quantiles so one huge day doesn't wash out everything else.
+		const pos = [...values.values()].filter((v) => v > 0).sort((a, b) => a - b);
+		const neg = [...values.values()].filter((v) => v < 0).map((v) => -v).sort((a, b) => a - b);
+		const cuts = (arr: number[], n: number) =>
+			Array.from({ length: n - 1 }, (_, i) => arr[Math.floor(((i + 1) / n) * arr.length)] ?? Infinity);
+		const posCuts = cuts(pos, heatRamp.length);
+		const negCuts = cuts(neg, heatNegRamp.length);
+		const bucket = (v: number, c: number[]) => {
+			let i = 0;
+			while (i < c.length && v >= c[i]) i++;
+			return i;
+		};
+		const colorFor = (v: number | null) => {
+			if (v == null || Math.abs(v) < 0.005) return heatEmpty;
+			return v > 0 ? heatRamp[bucket(v, posCuts)] : heatNegRamp[bucket(-v, negCuts)];
+		};
+		heatLegend = [heatEmpty, ...heatRamp];
+
+		const first = parseLocal(startDate || days[0].date);
+		const last = parseLocal(endDate || days[days.length - 1].date);
+		const years: HeatYear[] = [];
+		for (let y = first.getFullYear(); y <= last.getFullYear(); y++) {
+			const from = y === first.getFullYear() ? first : new Date(y, 0, 1);
+			const to = y === last.getFullYear() ? last : new Date(y, 11, 31);
+			const jan1 = new Date(y, 0, 1);
+			// Monday-based week columns, counted from the week holding Jan 1.
+			const offset = (jan1.getDay() + 6) % 7;
+			const cells: HeatCell[] = [];
+			const months: { label: string; x: number }[] = [];
+			let maxX = 0;
+			for (let d = from; d <= to; d = addDays(d, 1)) {
+				const doy = Math.round((d.getTime() - jan1.getTime()) / 86400000);
+				const col = Math.floor((doy + offset) / 7);
+				const row = (d.getDay() + 6) % 7;
+				const x = HEAT_LEFT + col * (HEAT_CELL + HEAT_GAP);
+				const date = fmtDate(d);
+				const amount = values.has(date) ? values.get(date)! : null;
+				cells.push({ date, x, y: HEAT_TOP + row * (HEAT_CELL + HEAT_GAP), amount, color: colorFor(amount) });
+				// Label the first partial month only if there's room before the next one.
+				if (d.getDate() === 1 || (cells.length === 1 && d.getDate() <= 18)) {
+					months.push({ label: d.toLocaleDateString('en-GB', { month: 'short' }), x });
+				}
+				maxX = Math.max(maxX, x);
+			}
+			years.push({ year: y, width: maxX + HEAT_CELL + 4, cells, months });
+		}
+		heatYears = years;
+
+		const flipped = days.map((d) => ({ date: d.date, v: heatFlip * d.amount }));
+		const maxDay = flipped.reduce((m, d) => (d.v > m.v ? d : m), flipped[0]);
+		const active = flipped.filter((d) => Math.abs(d.v) >= 0.005).length;
+		const total = heatFlip * rawTotal;
+		heatStats = { total, activeDays: active, perDay: active ? total / active : 0, maxDate: maxDay.date, max: maxDay.v };
+	}
+
 	function resetDates() {
 		if (dataRange) {
 			startDate = dataRange.start;
@@ -765,6 +1227,12 @@
 			flowRoot,
 			flowMaxDepth,
 			flowMinAmount,
+			monthlyRoot,
+			monthlyTopN,
+			incomeRoot,
+			expenseRoot,
+			assetRoots,
+			liabilityRoots,
 			createdAt: Date.now()
 		};
 	}
@@ -792,6 +1260,13 @@
 		flowRoot = topRoots.includes(p.flowRoot) ? p.flowRoot : flowRoot;
 		flowMaxDepth = p.flowMaxDepth;
 		flowMinAmount = p.flowMinAmount;
+		if (p.monthlyRoot && accounts.includes(p.monthlyRoot)) monthlyRoot = p.monthlyRoot;
+		if (p.monthlyTopN) monthlyTopN = p.monthlyTopN;
+		if (p.incomeRoot) incomeRoot = p.incomeRoot;
+		if (p.expenseRoot) expenseRoot = p.expenseRoot;
+		if (p.assetRoots) assetRoots = [...p.assetRoots];
+		if (p.liabilityRoots) liabilityRoots = [...p.liabilityRoots];
+		applyRootDefaults();
 		await refresh();
 	}
 
@@ -817,6 +1292,8 @@
 			postingAccounts = await beancountDB.getAllAccounts();
 			accounts = expandWithParents(postingAccounts);
 			dataRange = await beancountDB.getDateRange();
+			topRoots = deriveRoots(accounts);
+			applyRootDefaults();
 			if (!accounts.includes(selectedAccount) && accounts.length > 0) selectedAccount = accounts[0];
 			await refresh();
 		} catch (err) {
@@ -827,7 +1304,22 @@
 		}
 	}
 
-	const latest = () => (runningAverageData.length ? runningAverageData[runningAverageData.length - 1] : null);
+	function presetSummary(p: DashboardPreset): string {
+		const tab = tabs.find((t) => t.id === p.view)?.label ?? p.view;
+		switch (p.view) {
+			case 'trends':
+			case 'heatmap':
+				return `${tab} · ${p.account}`;
+			case 'cashflow':
+				return `${p.flowRoot} · depth ${p.flowMaxDepth}`;
+			case 'monthly':
+				return `${tab} · ${p.monthlyRoot ?? p.flowRoot}`;
+			default:
+				return tab;
+		}
+	}
+
+	$: latestPoint = runningAverageData.length ? runningAverageData[runningAverageData.length - 1] : null;
 </script>
 
 <div class="min-h-screen bg-gray-100 px-4 py-8">
@@ -889,7 +1381,7 @@
 									<button class="min-w-0 flex-1 text-left" on:click={() => applyPreset(p)}>
 										<span class="block truncate text-sm font-medium text-gray-800">{p.name}</span>
 										<span class="block truncate text-xs text-gray-400">
-											{p.view === 'trends' ? p.account : `${p.flowRoot} · depth ${p.flowMaxDepth}`}
+											{presetSummary(p)}
 										</span>
 									</button>
 									<button
@@ -908,22 +1400,19 @@
 				<!-- Main panel -->
 				<section class="rounded-lg bg-white p-6 shadow-sm">
 					<!-- Tabs -->
-					<div class="mb-5 flex gap-1 border-b border-gray-200">
-						<button
-							class="-mb-px border-b-2 px-4 py-2 text-sm font-medium {view === 'trends' ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-700'}"
-							on:click={() => setView('trends')}
-						>
-							Balance & Trends
-						</button>
-						<button
-							class="-mb-px border-b-2 px-4 py-2 text-sm font-medium {view === 'cashflow' ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-700'}"
-							on:click={() => setView('cashflow')}
-						>
-							Cash Flow (Hierarchy)
-						</button>
+					<div class="mb-5 flex gap-1 overflow-x-auto border-b border-gray-200">
+						{#each tabs as t (t.id)}
+							<button
+								class="-mb-px whitespace-nowrap border-b-2 px-4 py-2 text-sm font-medium {view === t.id ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-700'}"
+								on:click={() => setView(t.id)}
+							>
+								{t.label}
+							</button>
+						{/each}
 					</div>
 
 					<!-- Compare with an earlier/later period of the same width -->
+					{#if supportsCompare}
 					<div class="mb-5 rounded-md bg-gray-50 px-3 py-2">
 						<label class="flex items-center gap-2 text-sm font-medium text-gray-700">
 							<input
@@ -983,9 +1472,10 @@
 							<p class="mt-2 text-xs text-gray-500">Showing change vs {compareRange.startDate} → {compareRange.endDate} (flat = identical). Baseline end follows the current range width.</p>
 						{/if}
 					</div>
+					{/if}
 
 					<!-- Controls -->
-					{#if view === 'trends'}
+					{#if view === 'trends' || view === 'heatmap'}
 						<div class="mb-5 flex flex-wrap items-end gap-4">
 							<div class="min-w-56 flex-1">
 								<label for="account-select" class="mb-1 block text-sm font-medium text-gray-700">Account</label>
@@ -1006,6 +1496,7 @@
 									Include sub-accounts (roll up totals)
 								</span>
 							</label>
+							{#if view === 'trends'}
 							<div>
 								<label for="window-size" class="mb-1 block text-sm font-medium text-gray-700">Window (days)</label>
 								<input id="window-size" type="number" min="1" max="365" bind:value={windowSize} on:change={refresh} class="block w-24 rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500" />
@@ -1022,6 +1513,74 @@
 								<input type="checkbox" bind:checked={useEMA} on:change={refresh} class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
 								Smooth (EMA)
 							</label>
+							{/if}
+						</div>
+					{:else if view === 'monthly'}
+						<div class="mb-5 flex flex-wrap items-end gap-4">
+							<div class="min-w-56 flex-1">
+								<label for="monthly-root" class="mb-1 block text-sm font-medium text-gray-700">Split account</label>
+								<select
+									id="monthly-root"
+									bind:value={monthlyRoot}
+									on:change={refresh}
+									class="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+								>
+									{#each accounts as account}
+										<option value={account}>{account}</option>
+									{/each}
+								</select>
+							</div>
+							<div>
+								<label for="monthly-topn" class="mb-1 block text-sm font-medium text-gray-700">Categories</label>
+								<input id="monthly-topn" type="number" min="1" max={series.length} bind:value={monthlyTopN} on:change={refresh} class="block w-24 rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500" />
+							</div>
+							<p class="pb-2 text-sm text-gray-400">Bars stack the direct sub-accounts per month; the smallest fold into “Other”. Click a segment to list its transactions.</p>
+						</div>
+					{:else if view === 'income'}
+						<div class="mb-5 flex flex-wrap items-end gap-4">
+							<div class="min-w-48 flex-1">
+								<label for="income-root" class="mb-1 block text-sm font-medium text-gray-700">Income account</label>
+								<select id="income-root" bind:value={incomeRoot} on:change={refresh} class="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500">
+									{#each topRoots as r}
+										<option value={r}>{r}</option>
+									{/each}
+								</select>
+							</div>
+							<div class="min-w-48 flex-1">
+								<label for="expense-root" class="mb-1 block text-sm font-medium text-gray-700">Expenses account</label>
+								<select id="expense-root" bind:value={expenseRoot} on:change={refresh} class="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500">
+									{#each topRoots as r}
+										<option value={r}>{r}</option>
+									{/each}
+								</select>
+							</div>
+							<p class="pb-2 text-sm text-gray-400">Net = income − expenses. Click a bar to list its transactions.</p>
+						</div>
+					{:else if view === 'networth'}
+						<div class="mb-5 flex flex-wrap items-start gap-8">
+							<fieldset>
+								<legend class="mb-1 text-sm font-medium text-gray-700">Assets</legend>
+								<div class="flex flex-wrap gap-x-4 gap-y-1">
+									{#each topRoots as r}
+										<label class="flex items-center gap-2 text-sm text-gray-700">
+											<input type="checkbox" checked={assetRoots.includes(r)} on:change={(e) => toggleRoot('asset', r, e.currentTarget.checked)} class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+											{r}
+										</label>
+									{/each}
+								</div>
+							</fieldset>
+							<fieldset>
+								<legend class="mb-1 text-sm font-medium text-gray-700">Liabilities</legend>
+								<div class="flex flex-wrap gap-x-4 gap-y-1">
+									{#each topRoots as r}
+										<label class="flex items-center gap-2 text-sm text-gray-700">
+											<input type="checkbox" checked={liabilityRoots.includes(r)} on:change={(e) => toggleRoot('liability', r, e.currentTarget.checked)} class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+											{r}
+										</label>
+									{/each}
+								</div>
+							</fieldset>
+							<p class="text-sm text-gray-400">Balances accumulate from your first transaction, so the start date only trims the view.</p>
 						</div>
 					{:else}
 						<div class="mb-5 flex flex-wrap items-end gap-4">
@@ -1104,6 +1663,63 @@
 					{/if}
 
 					<!-- Chart -->
+					{#if view === 'heatmap'}
+					<div class="mb-6">
+						<div class="mb-2 flex flex-wrap items-center justify-between gap-3 text-sm">
+							<div class="min-h-5 text-gray-600">
+								{#if heatHover}
+									<span class="font-medium text-gray-800">{parseLocal(heatHover.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}</span>
+									· {heatHover.amount == null ? 'no postings' : eur(heatHover.amount)}
+								{:else}
+									<span class="text-gray-400">Hover a day for its total · click to list its transactions</span>
+								{/if}
+							</div>
+							<div class="flex items-center gap-1 text-xs text-gray-500">
+								<span class="mr-1">Less</span>
+								{#each heatLegend as c}
+									<span class="inline-block h-3 w-3 rounded-sm" style="background: {c}"></span>
+								{/each}
+								<span class="ml-1">More</span>
+								<span class="ml-3 inline-block h-3 w-3 rounded-sm" style="background: {heatNegRamp[2]}"></span>
+								<span>{heatFlip < 0 ? 'Outflow' : 'Refund / inflow'}</span>
+							</div>
+						</div>
+						<div class="max-h-[28rem] space-y-4 overflow-auto rounded-md border border-gray-100 p-3">
+							{#each heatYears as yr (yr.year)}
+								<div>
+									<div class="mb-1 text-sm font-semibold text-gray-700">{yr.year}</div>
+									<svg width={yr.width} height={HEAT_TOP + 7 * (HEAT_CELL + HEAT_GAP)} role="img" aria-label="Daily totals for {yr.year}">
+										{#each yr.months as m}
+											<text x={m.x} y="10" class="fill-gray-400 text-[10px]">{m.label}</text>
+										{/each}
+										{#each ['Mon', 'Wed', 'Fri'] as d, i}
+											<text x="0" y={HEAT_TOP + i * 2 * (HEAT_CELL + HEAT_GAP) + HEAT_CELL - 3} class="fill-gray-400 text-[10px]">{d}</text>
+										{/each}
+										{#each yr.cells as c (c.date)}
+											<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+											<rect
+												x={c.x}
+												y={c.y}
+												width={HEAT_CELL}
+												height={HEAT_CELL}
+												rx="3"
+												fill={c.color}
+												stroke={heatHover === c || selRange?.start === c.date ? '#111827' : 'none'}
+												stroke-width="1.5"
+												class="cursor-pointer"
+												on:mouseenter={() => (heatHover = c)}
+												on:mouseleave={() => (heatHover = null)}
+												on:click={() => showTransactions(selectedAccount, selectedAccount, includeDescendants, c.date, c.date)}
+											>
+												<title>{c.date}: {c.amount == null ? 'no postings' : eur(c.amount)}</title>
+											</rect>
+										{/each}
+									</svg>
+								</div>
+							{/each}
+						</div>
+					</div>
+					{:else}
 					<div class="mb-6">
 						<div class="mb-2 flex items-center justify-end gap-1 text-sm">
 							<span class="mr-2 text-gray-400">Zoom</span>
@@ -1122,17 +1738,18 @@
 							</div>
 						</div>
 						<p class="mt-1 text-xs text-gray-400">
-							Ctrl/⌘ + scroll to zoom · drag the scrollbars to pan{#if view === 'trends'} · <span class="text-gray-500">drag across the chart to select a range and list its transactions</span>{/if}.
+							Ctrl/⌘ + scroll to zoom · drag the scrollbars to pan{#if view === 'trends'}{' · '}<span class="text-gray-500">drag across the chart to select a range and list its transactions</span>{:else if view === 'monthly' || view === 'income'}{' · '}<span class="text-gray-500">click a bar to list its transactions</span>{/if}.
 						</p>
 					</div>
+					{/if}
 
 					<!-- Selected-range transactions -->
-					{#if view === 'trends' && selRange}
+					{#if selRange}
 						<div class="mb-6 rounded-lg border border-blue-100 bg-blue-50/40">
 							<div class="flex flex-wrap items-center justify-between gap-3 border-b border-blue-100 px-4 py-3">
 								<div>
 									<h3 class="text-sm font-semibold text-gray-800">
-										Transactions {selRange.start} → {selRange.end}
+										{selLabel} · {selRange.start === selRange.end ? selRange.start : `${selRange.start} → ${selRange.end}`}
 									</h3>
 									<p class="text-xs text-gray-500">
 										{selectedTransactions.length}
@@ -1171,7 +1788,7 @@
 											<tr>
 												<th class="px-4 py-2 font-medium">Date</th>
 												<th class="px-4 py-2 font-medium">Description</th>
-												{#if includeDescendants}
+												{#if selShowAccount}
 													<th class="px-4 py-2 font-medium">Account</th>
 												{/if}
 												<th class="px-4 py-2 text-right font-medium">Amount</th>
@@ -1185,7 +1802,7 @@
 														{t.payee || t.narration || '—'}
 														{#if t.payee && t.narration && t.payee !== t.narration}<span class="text-gray-400"> · {t.narration}</span>{/if}
 													</td>
-													{#if includeDescendants}
+													{#if selShowAccount}
 														<td class="px-4 py-2 text-gray-500">{t.account}</td>
 													{/if}
 													<td class="whitespace-nowrap px-4 py-2 text-right tabular-nums {t.amount < 0 ? 'text-red-600' : 'text-gray-800'}">
@@ -1205,15 +1822,85 @@
 						<div class="grid grid-cols-1 gap-4 md:grid-cols-3">
 							<div class="rounded-lg bg-gray-50 p-4">
 								<h3 class="text-sm font-medium text-gray-500">Current balance</h3>
-								<p class="mt-1 text-2xl font-bold text-gray-900">{latest() ? `€${latest()!.balance.toFixed(2)}` : 'N/A'}</p>
+								<p class="mt-1 text-2xl font-bold text-gray-900">{latestPoint ? `€${latestPoint.balance.toFixed(2)}` : 'N/A'}</p>
 							</div>
 							<div class="rounded-lg bg-gray-50 p-4">
 								<h3 class="text-sm font-medium text-gray-500">{showDailyRate ? 'Avg daily rate' : `Avg per ${windowSize}d`}</h3>
-								<p class="mt-1 text-2xl font-bold text-gray-900">{latest() ? `€${latest()!.runningAverage.toFixed(2)}` : 'N/A'}</p>
+								<p class="mt-1 text-2xl font-bold text-gray-900">{latestPoint ? `€${latestPoint.runningAverage.toFixed(2)}` : 'N/A'}</p>
 							</div>
 							<div class="rounded-lg bg-gray-50 p-4">
 								<h3 class="text-sm font-medium text-gray-500">Data points</h3>
 								<p class="mt-1 text-2xl font-bold text-gray-900">{runningAverageData.length}</p>
+							</div>
+						</div>
+					{:else if view === 'monthly'}
+						<div class="grid grid-cols-1 gap-4 md:grid-cols-3">
+							<div class="rounded-lg bg-gray-50 p-4">
+								<h3 class="text-sm font-medium text-gray-500">Total in range</h3>
+								<p class="mt-1 text-2xl font-bold text-gray-900">{eur(monthlyStats.total)}</p>
+							</div>
+							<div class="rounded-lg bg-gray-50 p-4">
+								<h3 class="text-sm font-medium text-gray-500">Average per month ({monthlyStats.months} months)</h3>
+								<p class="mt-1 text-2xl font-bold text-gray-900">{eur(monthlyStats.avg)}</p>
+							</div>
+							<div class="rounded-lg bg-gray-50 p-4">
+								<h3 class="text-sm font-medium text-gray-500">Largest category</h3>
+								<p class="mt-1 truncate text-2xl font-bold text-gray-900">{monthlyStats.top || 'N/A'}</p>
+							</div>
+						</div>
+					{:else if view === 'income'}
+						<div class="grid grid-cols-1 gap-4 md:grid-cols-4">
+							<div class="rounded-lg bg-gray-50 p-4">
+								<h3 class="text-sm font-medium text-gray-500">Income</h3>
+								<p class="mt-1 text-2xl font-bold text-gray-900">{eur(incomeStats.income)}</p>
+							</div>
+							<div class="rounded-lg bg-gray-50 p-4">
+								<h3 class="text-sm font-medium text-gray-500">Expenses</h3>
+								<p class="mt-1 text-2xl font-bold text-gray-900">{eur(incomeStats.expenses)}</p>
+							</div>
+							<div class="rounded-lg bg-gray-50 p-4">
+								<h3 class="text-sm font-medium text-gray-500">Net saved</h3>
+								<p class="mt-1 text-2xl font-bold text-gray-900">{eur(incomeStats.net)}</p>
+							</div>
+							<div class="rounded-lg bg-gray-50 p-4">
+								<h3 class="text-sm font-medium text-gray-500">Savings rate</h3>
+								<p class="mt-1 text-2xl font-bold text-gray-900">{incomeStats.rate == null ? 'N/A' : `${Math.round(incomeStats.rate * 100)}%`}</p>
+							</div>
+						</div>
+					{:else if view === 'networth'}
+						{@const first = netWorthData[0]}
+						{@const last = netWorthData[netWorthData.length - 1]}
+						<div class="grid grid-cols-1 gap-4 md:grid-cols-4">
+							<div class="rounded-lg bg-gray-50 p-4">
+								<h3 class="text-sm font-medium text-gray-500">Net worth{last ? ` on ${last.date}` : ''}</h3>
+								<p class="mt-1 text-2xl font-bold text-gray-900">{last ? eur(last.netWorth) : 'N/A'}</p>
+							</div>
+							<div class="rounded-lg bg-gray-50 p-4">
+								<h3 class="text-sm font-medium text-gray-500">Change over range</h3>
+								<p class="mt-1 text-2xl font-bold text-gray-900">{first && last ? `${last.netWorth >= first.netWorth ? '+' : ''}${eur(last.netWorth - first.netWorth)}` : 'N/A'}</p>
+							</div>
+							<div class="rounded-lg bg-gray-50 p-4">
+								<h3 class="text-sm font-medium text-gray-500">Assets</h3>
+								<p class="mt-1 text-2xl font-bold text-gray-900">{last ? eur(last.assets) : 'N/A'}</p>
+							</div>
+							<div class="rounded-lg bg-gray-50 p-4">
+								<h3 class="text-sm font-medium text-gray-500">Liabilities</h3>
+								<p class="mt-1 text-2xl font-bold text-gray-900">{last ? eur(last.liabilities) : 'N/A'}</p>
+							</div>
+						</div>
+					{:else if view === 'heatmap'}
+						<div class="grid grid-cols-1 gap-4 md:grid-cols-3">
+							<div class="rounded-lg bg-gray-50 p-4">
+								<h3 class="text-sm font-medium text-gray-500">Total in range</h3>
+								<p class="mt-1 text-2xl font-bold text-gray-900">{eur(heatStats.total)}</p>
+							</div>
+							<div class="rounded-lg bg-gray-50 p-4">
+								<h3 class="text-sm font-medium text-gray-500">Avg per active day ({heatStats.activeDays} days)</h3>
+								<p class="mt-1 text-2xl font-bold text-gray-900">{eur(heatStats.perDay)}</p>
+							</div>
+							<div class="rounded-lg bg-gray-50 p-4">
+								<h3 class="text-sm font-medium text-gray-500">Biggest day{heatStats.maxDate ? ` (${heatStats.maxDate})` : ''}</h3>
+								<p class="mt-1 text-2xl font-bold text-gray-900">{heatStats.maxDate ? eur(heatStats.max) : 'N/A'}</p>
 							</div>
 						</div>
 					{:else}

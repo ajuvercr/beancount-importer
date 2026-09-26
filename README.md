@@ -40,6 +40,36 @@ A Sankey/alluvial diagram that splits a chosen account into its sub-accounts.
 Each link's width is the total amount flowing into that sub-tree for the
 selected period, laid out as a strict left-to-right hierarchy (a DAG).
 
+### Monthly by Category
+
+Stacked bars per month, split into the direct sub-accounts of any account
+(e.g. `Uitgaven` → `Eten`, `Wonen`, …). Choose how many categories to show;
+the smallest fold into **Other**. A category keeps its color whatever date range
+you pick. Click a segment to list that month's transactions for it.
+
+### Income vs Expenses
+
+Income and expenses bars per month, with a **Net (saved)** line. The tooltip and
+stat tiles show the savings rate. The income and expense roots are
+auto-detected (`Inkomsten`/`Income`, `Uitgaven`/`Expenses`) and can be changed.
+
+### Net Worth
+
+Assets + liabilities over time, as a stepped line (with the assets and
+liabilities lines shown too when both are selected). Tick which top-level
+accounts count as assets or liabilities (`Activa`/`Assets` and
+`Passiva`/`Liabilities` are pre-selected). Balances accumulate from the very
+first transaction, so the start date only trims the view.
+
+### Calendar
+
+A GitHub-style heatmap with one cell per day for the selected account (sub-accounts
+optional), bucketed by quantile so a single large day doesn't wash out the rest.
+Days going the opposite way (refunds or inflows) are shown in red. Click a day
+to list its transactions.
+
+The compare/diff mode below applies to Balance & Trends and Cash Flow only.
+
 ### Compare / diff
 
 Tick **Compare with another period** to plot the *difference* between the
