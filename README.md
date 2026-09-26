@@ -86,7 +86,11 @@ current range and an earlier/later baseline of the **same width**:
 ### Saved views & date ranges
 
 - **Quick ranges**: This month, Last month, Last 3 months, YTD, This year,
-  Last year, All time, plus **−1y / −1m / +1m / +1y** window steppers.
+  Last year, All time.
+- **Adjust one edge**: the **−1y / −1m / +1m / +1y** buttons under the start
+  and end dates move just that edge, to grow or shrink the window (the start
+  never passes the end).
+- **Shift whole window**: slides both edges together, keeping the width.
 - **Presets**: save the full dashboard configuration (account, settings, date
   range) by name and re-apply it later from the sidebar.
 - **Zoom/pan**: Ctrl/⌘ + scroll to zoom either chart; drag to pan.

@@ -237,11 +237,16 @@
 			flowRoot = topRoots.find((r) => /uitgave|expense/i.test(r)) || topRoots[0] || '';
 			applyRootDefaults();
 
-			selectedAccount = accounts[0];
+			// The list starts with group accounts (no postings of their own), so
+			// default to the expenses tree rolled up rather than an empty chart.
+			selectedAccount = accounts.includes(flowRoot) ? flowRoot : accounts[0];
+			if (isGroupAccount(selectedAccount)) includeDescendants = true;
 			if (dataRange) {
 				startDate = dataRange.start;
 				endDate = dataRange.end;
 			}
+			// Leave the loading screen first: the chart canvas only exists after it.
+			isLoading = false;
 			await refresh();
 		} catch (err) {
 			console.error('Error initializing dashboard:', err);
@@ -370,7 +375,8 @@
 
 		const ctx = document.getElementById('chart') as HTMLCanvasElement;
 		if (!ctx) return;
-		if (chart) chart.destroy();
+		chart?.destroy();
+		chart = null;
 
 		if (runningAverageData.length === 0) {
 			error = `No data found for account "${selectedAccount}" in this range.`;
@@ -528,7 +534,8 @@
 
 		const ctx = document.getElementById('chart') as HTMLCanvasElement;
 		if (!ctx) return;
-		if (chart) chart.destroy();
+		chart?.destroy();
+		chart = null;
 
 		if (cashFlow.length === 0) {
 			error = `No sub-accounts found under "${flowRoot}" in this range. Try another account or lower the minimum amount.`;
@@ -737,7 +744,7 @@
 		if (!beancountDB || !monthlyRoot) return;
 		const ctx = document.getElementById('chart') as HTMLCanvasElement;
 		if (!ctx) return;
-		if (chart) chart.destroy();
+		chart?.destroy();
 		chart = null;
 
 		const rows = await beancountDB.getMonthlyByAccount(monthlyRoot, startDate, endDate);
@@ -832,7 +839,7 @@
 		if (!beancountDB) return;
 		const ctx = document.getElementById('chart') as HTMLCanvasElement;
 		if (!ctx) return;
-		if (chart) chart.destroy();
+		chart?.destroy();
 		chart = null;
 
 		if (!incomeRoot || !expenseRoot) {
@@ -905,7 +912,7 @@
 		if (!beancountDB) return;
 		const ctx = document.getElementById('chart') as HTMLCanvasElement;
 		if (!ctx) return;
-		if (chart) chart.destroy();
+		chart?.destroy();
 		chart = null;
 
 		if (assetRoots.length === 0 && liabilityRoots.length === 0) {
@@ -1134,19 +1141,42 @@
 		refresh();
 	}
 
+	// Move a date by whole months/years, clamping to the month's last day
+	// (Mar 31 − 1m → Feb 28/29, not Mar 3).
+	function stepDate(date: string, unit: 'month' | 'year', n: number): string {
+		const d = parseLocal(date);
+		const months = unit === 'year' ? n * 12 : n;
+		const target = new Date(d.getFullYear(), d.getMonth() + months, 1);
+		const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate();
+		target.setDate(Math.min(d.getDate(), lastDay));
+		return fmtDate(target);
+	}
+
 	function shiftRange(unit: 'month' | 'year', dir: 1 | -1) {
 		if (!startDate || !endDate) return;
-		const s = new Date(startDate);
-		const e = new Date(endDate);
-		if (unit === 'month') {
-			s.setMonth(s.getMonth() + dir);
-			e.setMonth(e.getMonth() + dir);
-		} else {
-			s.setFullYear(s.getFullYear() + dir);
-			e.setFullYear(e.getFullYear() + dir);
-		}
-		startDate = fmtDate(s);
-		endDate = fmtDate(e);
+		startDate = stepDate(startDate, unit, dir);
+		endDate = stepDate(endDate, unit, dir);
+		activeRange = 'custom';
+		refresh();
+	}
+
+	const edgeSteps: { unit: 'month' | 'year'; dir: 1 | -1; label: string; words: string }[] = [
+		{ unit: 'year', dir: -1, label: '−1y', words: 'one year' },
+		{ unit: 'month', dir: -1, label: '−1m', words: 'one month' },
+		{ unit: 'month', dir: 1, label: '+1m', words: 'one month' },
+		{ unit: 'year', dir: 1, label: '+1y', words: 'one year' }
+	];
+
+	// Grow or shrink the window from one side only.
+	function adjustEdge(edge: 'start' | 'end', unit: 'month' | 'year', dir: 1 | -1) {
+		const current = edge === 'start' ? startDate : endDate;
+		if (!current) return;
+		const next = stepDate(current, unit, dir);
+		// Never let the window invert.
+		if (edge === 'start' && endDate && next > endDate) return;
+		if (edge === 'end' && startDate && next < startDate) return;
+		if (edge === 'start') startDate = next;
+		else endDate = next;
 		activeRange = 'custom';
 		refresh();
 	}
@@ -1167,10 +1197,7 @@
 
 	function shiftCompare(unit: 'month' | 'year', dir: 1 | -1) {
 		if (!compareStart) return;
-		const s = parseLocal(compareStart);
-		if (unit === 'month') s.setMonth(s.getMonth() + dir);
-		else s.setFullYear(s.getFullYear() + dir);
-		compareStart = fmtDate(s);
+		compareStart = stepDate(compareStart, unit, dir);
 		refresh();
 	}
 
@@ -1294,7 +1321,11 @@
 			dataRange = await beancountDB.getDateRange();
 			topRoots = deriveRoots(accounts);
 			applyRootDefaults();
-			if (!accounts.includes(selectedAccount) && accounts.length > 0) selectedAccount = accounts[0];
+			if (!accounts.includes(selectedAccount) && accounts.length > 0) {
+				selectedAccount = accounts.includes(flowRoot) ? flowRoot : accounts[0];
+				if (isGroupAccount(selectedAccount)) includeDescendants = true;
+			}
+			isLoading = false;
 			await refresh();
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to load files';
@@ -1634,18 +1665,28 @@
 						</div>
 
 						<!-- Date inputs + shift steppers -->
-						<div class="flex flex-wrap items-end gap-4">
+						<div class="flex flex-wrap items-start gap-4">
 							<div>
 								<label for="start-date" class="mb-1 block text-sm font-medium text-gray-700">Start date</label>
 								<input id="start-date" type="date" bind:value={startDate} on:change={handleManualDate} class="block rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500" />
+								<div class="mt-1 inline-flex overflow-hidden rounded-md border border-gray-200 text-xs">
+									{#each edgeSteps as st, i}
+										<button on:click={() => adjustEdge('start', st.unit, st.dir)} title="Start {st.words} {st.dir < 0 ? 'earlier' : 'later'}" class="{i ? 'border-l border-gray-200' : ''} bg-white px-2 py-1 text-gray-600 hover:bg-gray-50">{st.label}</button>
+									{/each}
+								</div>
 							</div>
 							<div>
 								<label for="end-date" class="mb-1 block text-sm font-medium text-gray-700">End date</label>
 								<input id="end-date" type="date" bind:value={endDate} on:change={handleManualDate} class="block rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500" />
+								<div class="mt-1 inline-flex overflow-hidden rounded-md border border-gray-200 text-xs">
+									{#each edgeSteps as st, i}
+										<button on:click={() => adjustEdge('end', st.unit, st.dir)} title="End {st.words} {st.dir < 0 ? 'earlier' : 'later'}" class="{i ? 'border-l border-gray-200' : ''} bg-white px-2 py-1 text-gray-600 hover:bg-gray-50">{st.label}</button>
+									{/each}
+								</div>
 							</div>
 
 							<div>
-								<span class="mb-1 block text-sm font-medium text-gray-700">Shift window</span>
+								<span class="mb-1 block text-sm font-medium text-gray-700">Shift whole window</span>
 								<div class="inline-flex overflow-hidden rounded-md border border-gray-300">
 									<button on:click={() => shiftRange('year', -1)} title="Back one year" class="border-r border-gray-300 bg-white px-2.5 py-2 text-sm text-gray-600 hover:bg-gray-50">−1y</button>
 									<button on:click={() => shiftRange('month', -1)} title="Back one month" class="border-r border-gray-300 bg-white px-2.5 py-2 text-sm text-gray-600 hover:bg-gray-50">−1m</button>
